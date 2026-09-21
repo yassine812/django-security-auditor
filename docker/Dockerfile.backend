@@ -1,0 +1,9 @@
+FROM python:3.12-slim
+RUN useradd -m auditor
+WORKDIR /opt/auditor
+COPY . /opt/auditor
+RUN pip install --no-cache-dir -e ".[api]"
+USER auditor
+ENV DSA_WORKDIR=/data
+EXPOSE 8300
+ENTRYPOINT ["security-audit"]

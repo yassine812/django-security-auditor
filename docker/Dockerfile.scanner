@@ -1,0 +1,10 @@
+FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends nmap git \
+    && rm -rf /var/lib/apt/lists/*
+RUN useradd -m scanner
+WORKDIR /opt/auditor
+COPY . /opt/auditor
+RUN pip install --no-cache-dir -e .
+USER scanner
+# scanners receive work through /data; no credentials are baked into the image
+VOLUME ["/data"]

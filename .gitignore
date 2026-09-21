@@ -1,0 +1,26 @@
+# Runtime data: audits, reports, platform user store (hashed creds + bearer tokens), logs
+workdir/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environments / secrets
+.env
+*.env
+.netrc
+*.pem
+*.key
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

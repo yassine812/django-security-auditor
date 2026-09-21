@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Django Security Auditor</title>
+<style>
+ :root{--bg:#0b1220;--panel:#111a2e;--panel2:#16223a;--line:#24334f;--txt:#dbe4f3;--mut:#8ea2c0;
+       --red:#ef4444;--orange:#f59e0b;--green:#10b981;--blue:#3b82f6;--purple:#8b5cf6}
+ *{box-sizing:border-box}
+ body{margin:0;font:14px/1.45 ui-sans-serif,system-ui,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--txt)}
+ a{color:var(--blue);text-decoration:none}
+ header{display:flex;align-items:center;gap:14px;padding:10px 20px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+ header .logo{font-weight:700;letter-spacing:.4px}
+ header .logo span{color:var(--green)}
+ nav{display:flex;gap:4px;flex:1}
+ nav a{padding:6px 12px;border-radius:7px;color:var(--mut)}
+ nav a.active,nav a:hover{background:var(--panel2);color:var(--txt)}
+ main{padding:22px;max-width:1300px;margin:0 auto}
+ h1{font-size:19px;margin:8px 0 16px}
+ h2{font-size:15px;margin:22px 0 10px;color:var(--mut);text-transform:uppercase;letter-spacing:.06em}
+ .grid{display:grid;gap:12px}
+ .cards{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
+ .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+ .card .num{font-size:28px;font-weight:750}
+ .card .lbl{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+ .sev-Critical{color:var(--red)} .sev-High{color:#fb7185} .sev-Medium{color:var(--orange)} .sev-Low{color:var(--blue)} .sev-Info{color:var(--mut)}
+ .st-PASS{color:var(--green)} .st-FAIL{color:var(--red)} .st-PARTIAL{color:var(--orange)}
+ .st-NOT_TESTED,.st-NOT_APPLICABLE{color:var(--mut)} .st-MANUAL_REVIEW{color:var(--purple)}
+ table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+ th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top;font-size:13px}
+ th{background:var(--panel2);color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+ tr:last-child td{border-bottom:none}
+ .pill{display:inline-block;padding:2px 9px;border-radius:99px;font-size:11px;font-weight:700;background:var(--panel2);border:1px solid var(--line)}
+ .btn{background:var(--blue);border:none;color:#fff;padding:8px 14px;border-radius:8px;font-weight:600;cursor:pointer}
+ .btn.sec{background:var(--panel2);border:1px solid var(--line);color:var(--txt)}
+ input,select,textarea{background:var(--panel2);border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:8px 10px;width:100%;font:inherit}
+ label{display:block;margin:10px 0 4px;color:var(--mut);font-size:12px}
+ .row{display:flex;gap:10px;flex-wrap:wrap}
+ .row>*{flex:1}
+ .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:16px}
+ .tabs{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
+ .tabs a{padding:6px 12px;border-radius:7px;background:var(--panel2);color:var(--mut);border:1px solid var(--line)}
+ .tabs a.active{color:var(--txt);border-color:var(--blue)}
+ pre{background:#0a0f1c;border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto;font-size:12px;max-height:320px}
+ .muted{color:var(--mut)} .small{font-size:12px}
+ .disclaimer{border:1px solid #7c2d12;background:#431407;border-radius:10px;padding:10px 14px;font-size:12.5px}
+ #login{max-width:380px;margin:80px auto}
+ code{background:#0a0f1c;padding:1px 6px;border-radius:5px;font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">&#128737; Django Security <span>Auditor</span></div>
+  <nav id="nav">
+    <a href="#/dashboard">Dashboard</a>
+    <a href="#/projects">Projects</a>
+    <a href="#/audits">Audits</a>
+    <a href="#/settings">Settings</a>
+  </nav>
+  <button class="btn sec" onclick="logout()">Sign out</button>
+</header>
+<main id="app"></main>
+
+<script>
+const API="";
+let TOKEN=localStorage.getItem("dsa_token")||"";
+async function api(path,opts={}){
+  opts.headers=Object.assign({"Content-Type":"application/json"},opts.headers||{});
+  if(TOKEN)opts.headers["Authorization"]="Bearer "+TOKEN;
+  const r=await fetch(API+path,opts);
+  if(r.status===401){showLogin();throw new Error("unauthorized")}
+  if(!r.ok)throw new Error((await r.json()).detail||r.statusText);
+  return r.json();
+}
+function logout(){localStorage.removeItem("dsa_token");TOKEN="";showLogin();}
+async function downloadReport(id,fmt){
+  const err=document.getElementById("dlerr");
+  try{
+    const r=await fetch(`/api/reports/${id}/${fmt}`,{headers:{Authorization:"Bearer "+TOKEN}});
+    if(r.status===401){showLogin();return;}
+    if(!r.ok)throw new Error((await r.json()).detail||r.statusText);
+    const blob=await r.blob();
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download=`${id}-${fmt==="csv"?"findings.csv":"report."+fmt}`;
+    document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href),5000);
+  }catch(e){if(err)err.textContent="Download failed: "+e.message;}
+}
+function showLogin(){
+  document.getElementById("app").innerHTML=`
+  <div id="login" class="panel">
+    <h1>Sign in</h1>
+    <label>Username</label><input id="u" value="admin">
+    <label>Password</label><input id="p" type="password">
+    <p class="small muted">Default bootstrap credentials: admin / admin-audit-2026 (change immediately in production).</p>
+    <button class="btn" onclick="doLogin()">Sign in</button>
+    <p id="lerr" class="sev-Critical"></p>
+  </div>`;
+}
+async function doLogin(){
+  try{const r=await api("/api/auth/token",{method:"POST",body:JSON.stringify({username:u.value,password:p.value})});
+    TOKEN=r.token;localStorage.setItem("dsa_token",TOKEN);route();}
+  catch(e){document.getElementById("lerr").textContent=e.message;}
+}
+function pill(t,cls){return `<span class="pill ${cls||""}">${t}</span>`}
+function sevPill(s){return pill(s,"sev-"+s)} function stPill(s){return pill(s.replace(/_/g," "),"st-"+s)}
+
+// ---------------- pages ----------------
+async function pageDashboard(){
+  const [a]=await Promise.all([api("/api/audits")]);
+  const latest=a.audits[0];
+  let detail=null; if(latest){try{detail=await api("/api/audits/"+latest.id);}catch(e){}}
+  const el=document.getElementById("app");
+  if(!detail){el.innerHTML="<h1>Dashboard</h1><div class='panel muted'>No audits yet. Create one from <a href='#/audits'>Audits</a>.</div>";return;}
+  const sc=detail.score||{},fbs=sc.findings_by_severity||{},rbs=sc.requirements_by_status||{};
+  const src={sast:0,dast:0,network:0,dependencies:0,configuration:0,automated:0};
+  (detail.findings||[]).forEach(f=>(f.sources||[]).forEach(s=>src[s]=(src[s]||0)+1));
+  el.innerHTML=`<h1>Dashboard &mdash; ${detail.id}</h1>
+  ${detail.status!=="COMPLETE"?`<div class="panel">Audit status: ${pill(detail.status)} &mdash; pipeline running. This page auto-refreshes.</div>`:""}
+  <div class="grid cards">
+    <div class="card"><div class="num">${sc.score!=null?sc.score:"&ndash;"}</div><div class="lbl">Security score /100</div></div>
+    ${["Critical","High","Medium","Low","Info"].map(s=>`<div class="card"><div class="num sev-${s}">${fbs[s]||0}</div><div class="lbl">${s}</div></div>`).join("")}
+  </div>
+  <h2>Requirements (${(detail.requirement_results||[]).length})</h2>
+  <div class="grid cards">
+    ${["PASS","FAIL","PARTIAL","NOT_TESTED","MANUAL_REVIEW","NOT_APPLICABLE"].map(s=>`<div class="card"><div class="num st-${s}">${rbs[s]||0}</div><div class="lbl">${s.replace(/_/g," ")}</div></div>`).join("")}
+  </div>
+  <h2>Findings by engine</h2>
+  <div class="grid cards">
+    ${Object.entries(src).map(([k,v])=>`<div class="card"><div class="num">${v}</div><div class="lbl">${k}</div></div>`).join("")}
+  </div>
+  <div class="disclaimer" style="margin-top:18px">The score is a summary metric only. NOT_TESTED and MANUAL_REVIEW requirements remain open: absence of findings is not proof of security.</div>`;
+  if(detail.status!=="COMPLETE")setTimeout(route,4000);
+}
+async function pageProjects(){
+  const d=await api("/api/projects");
+  document.getElementById("app").innerHTML=`<h1>Projects</h1>
+  <table><tr><th>Name</th><th>Type</th><th>Path / repo</th><th>Commit</th></tr>
+  ${(d.projects||[]).map(p=>`<tr><td>${p.name||""}</td><td>${p.source_type||""}</td><td class="small">${p.repo_url||p.path||""}</td><td class="small">${(p.commit_sha||"").slice(0,12)}</td></tr>`).join("")||"<tr><td colspan=4 class='muted'>No projects yet.</td></tr>"}</table>`;
+}
+async function pageAudits(){
+  const d=await api("/api/audits");
+  document.getElementById("app").innerHTML=`<h1>Audits</h1>
+  <div class="panel">
+    <h2 style="margin-top:0">Create audit</h2>
+    <div class="row">
+      <div><label>Project name</label><input id="np" placeholder="my-django-project"></div>
+      <div><label>Source type</label><select id="st"><option value="local">Local folder</option><option value="github">GitHub</option></select></div>
+      <div><label>Local path / GitHub URL</label><input id="pth" placeholder="./project or https://github.com/org/repo"></div>
+    </div>
+    <label><input type="checkbox" id="authz" style="width:auto"> I confirm that I am authorized to security-test this application and its infrastructure.</label>
+    <button class="btn" onclick="createAudit()">Start audit</button> <span id="cerr" class="sev-Critical"></span>
+  </div>
+  <table><tr><th>ID</th><th>Project</th><th>Created</th><th>Status</th><th></th></tr>
+  ${(d.audits||[]).map(a=>`<tr><td><a href="#/audits/${a.id}">${a.id}</a></td><td>${a.project||""}</td><td class="small">${a.created_at||""}</td><td>${pill(a.status||"")}</td><td><a href="#/audits/${a.id}">open</a></td></tr>`).join("")}</table>`;
+}
+async function createAudit(){
+  const stype=st.value,isGh=stype==="github";
+  const project=isGh?{name:np.value||"github-project",source_type:"github",repo_url:pth.value}
+                    :{name:np.value||"local-project",source_type:"local",path:pth.value};
+  try{const r=await api("/api/audits",{method:"POST",body:JSON.stringify({project,authorization_confirmed:authz.checked})});
+    location.hash="#/audits/"+r.audit_id;}
+  catch(e){document.getElementById("cerr").textContent=e.message;}
+}
+async function pageAudit(id,tab){
+  const d=await api("/api/audits/"+id);
+  tab=tab||"overview";
+  const tabs=["overview","requirements","findings","endpoints","jobs","logs","report"];
+  let body="";
+  if(tab==="overview"){
+    body=`<div class="grid cards">
+      ${["Critical","High","Medium","Low","Info"].map(s=>`<div class="card"><div class="num sev-${s}">${(d.score.findings_by_severity||{})[s]||0}</div><div class="lbl">${s}</div></div>`).join("")}
+    </div>
+    <h2>Pipeline</h2><table><tr><th>Job</th><th>Status</th><th>Error</th></tr>
+    ${(d.jobs||[]).map(j=>`<tr><td>${j.name}</td><td>${pill(j.status)}</td><td class="small muted">${j.error||""}</td></tr>`).join("")}</table>
+    <h2>Structured log</h2><pre>${(d.logs||[]).map(l=>`[${l.ts.slice(11,19)}] ${l.level} ${l.message}`).join("\n")}</pre>`;
+  }else if(tab==="requirements"){
+    body=`<table><tr><th>Req</th><th>Status</th><th>Sources</th><th>Findings</th><th>Evidence / notes</th></tr>
+    ${(d.requirement_results||[]).map(r=>`<tr><td><b>${r.requirement_id}</b></td><td>${stPill(r.status)}</td><td class="small">${(r.sources||[]).join(", ")}</td><td class="small">${(r.finding_ids||[]).length}</td><td class="small muted">${(r.notes||[]).join(" | ").slice(0,220)}</td></tr>`).join("")}</table>`;
+  }else if(tab==="findings"){
+    body=`<table><tr><th>Title</th><th>Severity</th><th>Confidence</th><th>CWE</th><th>OWASP</th><th>Reqs</th><th>Location</th></tr>
+    ${(d.findings||[]).map(f=>`<tr><td>${f.title}<div class="small muted">${(f.description||"").slice(0,160)}</div></td><td>${sevPill(f.severity)}</td><td>${f.confidence}</td><td class="small">${(f.cwe||[]).join(", ")}</td><td class="small">${f.owasp||""}</td><td class="small">${(f.requirement_ids||[]).join(", ")}</td><td class="small">${f.file?f.file+":"+(f.line||""):(f.endpoint||"")}</td></tr>`).join("")||"<tr><td colspan=7 class='muted'>No findings</td></tr>"}</table>`;
+  }else if(tab==="endpoints"){
+    body=`<table><tr><th>Method</th><th>Path</th><th>View</th><th>Note</th></tr>
+    ${(d.endpoints||[]).map(e=>`<tr><td>${e.method}</td><td><code>${e.path}</code></td><td class="small">${e.view||""}</td><td class="small muted">${e.note||""}</td></tr>`).join("")||"<tr><td colspan=4 class='muted'>No endpoints discovered</td></tr>"}</table>`;
+  }else if(tab==="jobs"){
+    body=`<table><tr><th>Job</th><th>Status</th><th>Started</th><th>Finished</th><th>Error</th></tr>
+    ${(d.jobs||[]).map(j=>`<tr><td>${j.name}</td><td>${pill(j.status)}</td><td class="small">${j.started_at||""}</td><td class="small">${j.finished_at||""}</td><td class="small muted">${j.error||""}</td></tr>`).join("")}</table>`;
+  }else if(tab==="logs"){
+    body=`<pre>${(d.logs||[]).map(l=>`[${l.ts.slice(11,19)}] ${l.level} ${l.message}`).join("\n")}</pre>`;
+  }else if(tab==="report"){
+    body=`<div class="panel">
+      <button class="btn" onclick="downloadReport('${id}','html')">HTML report</button>
+      <button class="btn sec" onclick="downloadReport('${id}','pdf')">PDF</button>
+      <button class="btn sec" onclick="downloadReport('${id}','json')">JSON</button>
+      <button class="btn sec" onclick="downloadReport('${id}','csv')">CSV (findings)</button>
+      <p id="dlerr" class="sev-Critical"></p>
+      <p class="small muted">Reports include executive summary, coverage, evidence, CWE/OWASP mapping, remediation and limitations.</p></div>`;
+  }
+  document.getElementById("app").innerHTML=`
+  <h1>Audit ${id} ${pill(d.status)}</h1>
+  <p class="small muted">Project: <b>${(d.project||{}).name}</b> &mdash; ${(d.project||{}).source_type}
+  ${(d.project||{}).commit_sha?` &mdash; commit <code>${d.project.commit_sha.slice(0,12)}</code>`:""}</p>
+  <div class="tabs">${tabs.map(t=>`<a class="${t===tab?"active":""}" href="#/audits/${id}/${t}">${t}</a>`).join("")}</div>
+  ${body}
+  ${d.status!=="COMPLETE"?'<p class="muted small">Audit in progress &mdash; auto-refreshing&hellip;</p>':""}`;
+  if(d.status!=="COMPLETE")setTimeout(route,4000);
+}
+function pageSettings(){
+  document.getElementById("app").innerHTML=`<h1>Settings</h1>
+  <div class="panel">
+    <p class="small muted">Configuration is loaded from <code>security-audit.yml</code> in the platform root.
+    Only targets listed under <code>network.authorized_targets</code> (default: 127.0.0.1 / localhost) may be network-scanned.
+    Network and DAST steps additionally require the explicit authorization confirmation.</p>
+    <label>API token</label><input value="${TOKEN}">
+  </div>`;
+}
+// ---------------- router ----------------
+async function route(){
+  const h=location.hash||"#/dashboard";
+  document.querySelectorAll("#nav a").forEach(a=>a.classList.toggle("active",a.getAttribute("href")===h.split("/").slice(0,2).join("/")));
+  if(!TOKEN){showLogin();return;}
+  try{
+    if(h.startsWith("#/projects"))await pageProjects();
+    else if(h.startsWith("#/audits/")){const [,,$1,$2]=h.split("/");await pageAudit($1,$2);}
+    else if(h.startsWith("#/audits"))await pageAudits();
+    else if(h.startsWith("#/settings"))pageSettings();
+    else await pageDashboard();
+  }catch(e){document.getElementById("app").innerHTML=`<div class="panel sev-Critical">${e.message}</div>`;}
+}
+window.addEventListener("hashchange",route);
+route();
+</script>
+</body>
+</html>

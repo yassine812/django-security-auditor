@@ -1,0 +1,6 @@
+# The reference dashboard is a static single-page app served by the backend.
+# For the full Next.js/React/tailwind/shadcn frontend described in docs,
+# build it here and proxy /api to the backend service.
+FROM nginx:alpine
+COPY frontend/dashboard.html /usr/share/nginx/html/index.html
+EXPOSE 3000

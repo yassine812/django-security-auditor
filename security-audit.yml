@@ -1,0 +1,43 @@
+# security-audit.yml - audit platform configuration (spec 32)
+project:
+  framework: django
+
+scanning:
+  sast: true
+  dependencies: true
+  network: true
+  dast: true
+  requirements: true
+  security_tests: true
+
+network:
+  # ONLY these targets may be network-scanned. Default scope is loopback.
+  authorized_targets:
+    - 127.0.0.1
+    - localhost
+  expected_open_ports: [80, 443]
+  timeout: 120
+
+dast:
+  enabled: true
+  target: auto
+  allow_local_runserver: true      # fallback when Docker is unavailable
+  # allow_local_runserver_github: false   # keep false: GitHub sources DAST in containers
+  timeout: 300
+  # zap_api_url: http://zap:8090   # optional OWASP ZAP integration
+
+requirements:
+  total: 137
+
+severity:
+  critical: true
+  high: true
+  medium: true
+  low: true
+
+# Test accounts for authenticated DAST / authorization tests (optional):
+# accounts:
+#   admin:   {username: admin@example.com, password: "...", login_url: /admin/login/}
+#   user:    {username: user@example.com,  password: "..."}
+#   user_a:  {username: a@example.com,     password: "..."}
+#   user_b:  {username: b@example.com,     password: "..."}

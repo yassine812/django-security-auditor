@@ -1,0 +1,78 @@
+# Production deployment (spec 22).  Scanners run in isolated containers with
+# resource limits; the scanner container has no unnecessary host access.
+version: "3.9"
+
+services:
+  frontend:
+    build: {context: ., dockerfile: docker/Dockerfile.frontend}
+    ports: ["3000:3000"]
+    depends_on: [backend]
+
+  backend:
+    build: {context: ., dockerfile: docker/Dockerfile.backend}
+    command: security-audit serve --host 0.0.0.0 --port 8300
+    environment:
+      - DSA_WORKDIR=/data
+      - DSA_CONFIG=/config/security-audit.yml
+    volumes:
+      - audit-data:/data
+      - ./security-audit.yml:/config/security-audit.yml:ro
+    ports: ["8300:8300"]
+    depends_on: [postgres, redis]
+
+  worker:
+    build: {context: ., dockerfile: docker/Dockerfile.backend}
+    command: security-audit worker
+    environment:
+      - DSA_WORKDIR=/data
+    volumes: [audit-data:/data]
+    deploy:
+      resources:
+        limits: {cpus: "2.0", memory: 2g}
+    depends_on: [postgres, redis]
+
+  scanner:
+    build: {context: ., dockerfile: docker/Dockerfile.scanner}
+    # SAST/AST/settings/dependency analysis runs here - filesystem only, no network
+    network_mode: "none"
+    deploy:
+      resources:
+        limits: {cpus: "2.0", memory: 4g, pids: 512}
+    volumes: [audit-data:/data]
+
+  network-scanner:
+    build: {context: ., dockerfile: docker/Dockerfile.scanner}
+    # nmap needs raw-ish sockets; restricted to the compose network by default
+    cap_drop: [ALL]
+    cap_add: [NET_RAW]
+    deploy:
+      resources:
+        limits: {cpus: "1.0", memory: 1g}
+    volumes: [audit-data:/data]
+
+  zap:
+    image: ghcr.io/zaproxy/zaproxy:stable
+    command: zap.sh -daemon -port 8090 -config api.disablekey=true
+    deploy:
+      resources:
+        limits: {cpus: "2.0", memory: 3g}
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: auditor
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_pass
+    secrets: [pg_pass]
+    volumes: [pg-data:/var/lib/postgresql/data]
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+
+volumes:
+  audit-data: {}
+  pg-data: {}
+
+secrets:
+  pg_pass:
+    file: ./docker/pg_pass.txt

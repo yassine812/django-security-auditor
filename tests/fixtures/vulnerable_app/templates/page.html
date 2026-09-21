@@ -1,0 +1,8 @@
+<html>
+<body>
+{% autoescape off %}
+<div>{{ content|safe }}</div>
+{% endautoescape %}
+<p>{{ user_note|safe }}</p>
+</body>
+</html>
