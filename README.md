@@ -41,6 +41,21 @@ security-audit init                                                  # security-
 security-audit serve --host 127.0.0.1 --port 8300                    # API + dashboard
 ```
 
+### Running on Windows
+
+No VPS or Docker needed — it runs natively:
+
+1. Install Python 3.10+ from python.org (tick **"Add python.exe to PATH"**).
+2. Double-click **`scripts\setup-windows.bat`** — creates `.venv`, installs
+   everything, runs the test suite.
+3. Double-click **`scripts\run-dashboard.bat`** → dashboard at
+   `http://127.0.0.1:8300` (login `admin` / `admin-audit-2026` — change it).
+4. Audit a project: `scripts\run-audit.bat C:\path\to\django-project`.
+
+Notes: DAST uses the loopback `runserver` fallback automatically (Docker
+optional); the network scanner uses its pure-Python engine when `nmap` is not
+installed; both degrade gracefully, never into fake PASS results.
+
 `--yes` stands for the mandatory authorization confirmation:
 
 > *"I confirm that I am authorized to security-test this application and its
