@@ -58,20 +58,95 @@ def _wait_http(url: str, timeout: float = 60.0) -> bool:
     return False
 
 
-def _pick_python(project: Path) -> str:
-    # POSIX venv layout
-    for candidate in (project / ".venv/bin/python", project / "venv/bin/python"):
-        if candidate.exists():
-            return str(candidate)
-    # Windows venv layout
-    for candidate in (project / ".venv/Scripts/python.exe", project / "venv/Scripts/python.exe"):
-        if candidate.exists():
-            return str(candidate)
-    return (shutil.which("python3") or shutil.which("python") or sys.executable)
+SKIP_DIR_NAMES = {
+    ".git", "node_modules", ".venv", "venv", "env", "__pycache__", ".tox",
+    ".mypy_cache", ".pytest_cache", "dist", "build", ".next", "site-packages",
+    "staticfiles", "vendor", "migrations",
+}
+
+
+def _find_manage_py(project: Path, max_depth: int = 4) -> Path | None:
+    """BFS for the nearest directory containing manage.py (breadth-first so the
+    shallowest Django project root wins).  Handles repos where the Django
+    project lives in a subfolder (e.g. ``repo/Module_Audit/manage.py``)."""
+    queue: list[tuple[Path, int]] = [(project, 0)]
+    while queue:
+        cur, depth = queue.pop(0)
+        if (cur / "manage.py").is_file():
+            return cur
+        if depth >= max_depth:
+            continue
+        try:
+            children = sorted(cur.iterdir(), key=lambda p: p.name)
+        except OSError:
+            continue
+        for child in children:
+            if (child.is_dir() and child.name not in SKIP_DIR_NAMES
+                    and not child.name.startswith(".")):
+                queue.append((child, depth + 1))
+    return None
+
+
+def _has_django(python: str) -> bool:
+    try:
+        return subprocess.run([python, "-c", "import django"], capture_output=True,
+                              timeout=20).returncode == 0
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return False
+
+
+def _venv_pythons(*roots: Path):
+    for root in roots:
+        for rel in (".venv/bin/python", "venv/bin/python",
+                    ".venv/Scripts/python.exe", "venv/Scripts/python.exe"):
+            cand = root / rel
+            if cand.exists():
+                yield str(cand)
+
+
+def _build_isolated_venv(django_version: str | None, drf: bool) -> str | None:
+    """Best-effort isolated venv with the detected Django version (+DRF), so a
+    project with no usable venv can still be started for DAST.  Never touches
+    the auditor's or the project's environment."""
+    import tempfile
+    dest = Path(tempfile.mkdtemp(prefix="audit-sandbox-")) / "venv"
+    try:
+        subprocess.run([sys.executable, "-m", "venv", str(dest)],
+                       capture_output=True, timeout=180, check=True)
+    except Exception:  # noqa: BLE001
+        return None
+    pip = dest / ("Scripts/pip.exe" if IS_WINDOWS else "bin/pip")
+    pkgs = [f"django=={django_version}" if django_version else "django"]
+    if drf:
+        pkgs.append("djangorestframework")
+    try:
+        subprocess.run([str(pip), "install", "--disable-pip-version-check", "-q", *pkgs],
+                       capture_output=True, timeout=420, check=True)
+    except Exception:  # noqa: BLE001
+        return None
+    return str(dest / ("Scripts/python.exe" if IS_WINDOWS else "bin/python"))
+
+
+def _pick_python(project: Path, manage_root: Path, profile: dict | None) -> tuple[str, str]:
+    """Return (python, note).  Prefer an interpreter that can import django."""
+    candidates = list(_venv_pythons(manage_root, project))
+    candidates += [p for p in (shutil.which("python3"), shutil.which("python"),
+                               sys.executable) if p]
+    for cand in candidates:
+        if _has_django(cand):
+            return cand, "project/system interpreter with django"
+    # No interpreter has django: build an isolated venv with detected version.
+    ver = (profile or {}).get("django_version_hint") or None
+    drf = bool((profile or {}).get("api"))
+    iso = _build_isolated_venv(ver, drf)
+    if iso:
+        return iso, "isolated venv (auto-installed django)"
+    return candidates[0], "no interpreter with django found"
 
 
 def start_application(source_dir: str, config: dict, source_type: str = "local",
-                      wait_timeout: float = 45.0) -> StartupResult:
+                      wait_timeout: float = 45.0,
+                      profile: dict | None = None) -> StartupResult:
     project = Path(source_dir)
     dast_cfg = (config or {}).get("dast", {}) or {}
     allow_runserver = dast_cfg.get("allow_local_runserver", True)
@@ -104,17 +179,20 @@ def start_application(source_dir: str, config: dict, source_type: str = "local",
     if not allow_runserver:
         return StartupResult(False, reason="local runserver fallback disabled by configuration")
 
-    manage = project / "manage.py"
-    if not manage.is_file():
-        return StartupResult(False, reason="no manage.py found - cannot start the application")
+    manage_root = _find_manage_py(project)
+    if manage_root is None:
+        return StartupResult(False, reason=(
+            "no manage.py found within 4 directory levels - cannot start the "
+            "application (point the audit at the folder containing manage.py, "
+            "or at a parent of it)"))
 
     port = _free_port()
     env = dict(os.environ)
     env.setdefault("PYTHONUNBUFFERED", "1")
     env.setdefault("DJANGO_ALLOWED_HOSTS", "127.0.0.1,localhost")
-    python = _pick_python(project)
+    python, py_note = _pick_python(project, manage_root, profile)
     cmd = [python, "manage.py", "runserver", f"127.0.0.1:{port}", "--noreload"]
-    log_path = project / ".audit-runserver.log"
+    log_path = manage_root / ".audit-runserver.log"
     try:
         logf = open(log_path, "wb")
         popen_kwargs = {}
@@ -124,14 +202,14 @@ def start_application(source_dir: str, config: dict, source_type: str = "local",
             popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         else:
             popen_kwargs["start_new_session"] = True
-        proc = subprocess.Popen(cmd, cwd=project, stdout=logf, stderr=subprocess.STDOUT,
-                                env=env, **popen_kwargs)
+        proc = subprocess.Popen(cmd, cwd=manage_root, stdout=logf,
+                                stderr=subprocess.STDOUT, env=env, **popen_kwargs)
     except (OSError, ValueError) as exc:
         return StartupResult(False, reason=f"could not launch runserver: {exc}")
 
     base = f"http://127.0.0.1:{port}"
     if _wait_http(base, wait_timeout):
-        return StartupResult(True, base, "runserver", process=proc)
+        return StartupResult(True, base, f"runserver ({py_note})", process=proc)
 
     # failed: collect tail of log for the report
     _terminate(proc)

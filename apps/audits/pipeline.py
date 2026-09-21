@@ -98,7 +98,8 @@ class AuditPipeline:
             audit.set_job("app_start", "RUNNING")
             audit.log("INFO", "Starting isolated application instance for DAST")
             startup = start_application(ctx.source_dir, audit.config,
-                                        audit.project.get("source_type", "local"))
+                                        audit.project.get("source_type", "local"),
+                                        profile=ctx.profile)
             if startup.started:
                 ctx.base_url = startup.base_url
                 audit.set_job("app_start", "SUCCESS")

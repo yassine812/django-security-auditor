@@ -14,6 +14,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from apps.audits.models import Audit, AuditStore
+from apps.reports.fix_examples import fix_for
 
 SEV_COLORS = {"Critical": "#7f1d1d", "High": "#b91c1c", "Medium": "#d97706",
               "Low": "#2563eb", "Info": "#6b7280"}
@@ -134,7 +135,20 @@ def write_html(audit: Audit, path: Path) -> None:
         f"<td>{e(f.get('owasp', ''))}</td>"
         f"<td>{e(', '.join(f.get('requirement_ids', [])))}</td>"
         f"<td>{e(f.get('file') or f.get('endpoint') or '')}</td>"
-        f"<td>{e(f.get('line') or '')}</td></tr>"
+        f"<td>{e(f.get('line') or '')}</td>"
+        f"<td><code>{e((f.get('proof') or '')[:160])}</code></td></tr>"
+        for f in sorted(audit.findings, key=lambda x: x["severity"]))
+
+    # precise remediation blocks (what to fix exactly)
+    fix_blocks = "".join(
+        (lambda fx: f"""<div class=\"banner\" style=\"border-left:6px solid {SEV_COLORS.get(f['severity'],'#334155')}\">
+ <b>[{e(f['severity'])}] {e(f['title'])}</b> &mdash; <code>{e(f.get('file') or f.get('endpoint') or '')}{(':' + str(f['line'])) if f.get('line') else ''}</code><br>
+ {('<b>Vulnerable code:</b> <code>' + e(f.get('proof') or '') + '</code><br>') if f.get('proof') else ''}
+ {('<b>Why it matters:</b> ' + e(fx['problem']) + '<br>') if fx['problem'] else ''}
+ <b>Instead of:</b><pre style="background:#0b1220;padding:8px;border-radius:6px;overflow:auto">{e(fx['before'])}</pre>
+ <b>Do this:</b><pre style="background:#0b1220;padding:8px;border-radius:6px;overflow:auto">{e(fx['after'])}</pre>
+ <b>Remediation:</b> {e(f.get('remediation', ''))}
+ </div>""")(fix_for(f))
         for f in sorted(audit.findings, key=lambda x: x["severity"]))
 
     req_rows = "".join(
@@ -188,8 +202,11 @@ Findings (deduplicated): <b>{len(audit.findings)}</b></p>
 
 <h2>Vulnerabilities (deduplicated findings)</h2>
 <table><tr><th>ID</th><th>Title</th><th>Severity</th><th>Confidence</th><th>CWE</th>
-<th>OWASP</th><th>Requirements</th><th>Location</th><th>Line</th></tr>
-{findings_rows or '<tr><td colspan=9>No findings</td></tr>'}</table>
+<th>OWASP</th><th>Requirements</th><th>Location</th><th>Line</th><th>Vulnerable code</th></tr>
+{findings_rows or '<tr><td colspan=10>No findings</td></tr>'}</table>
+
+<h2>How to fix (exact remediation)</h2>
+{fix_blocks or '<p>No findings to remediate.</p>'}
 
 <h2>Requirements coverage ({len(audit.requirement_results)} requirements)</h2>
 <table><tr><th>Requirement</th><th>Status</th><th>Sources</th><th>Evidence / notes</th></tr>
@@ -290,6 +307,10 @@ def write_pdf(audit: Audit, path: Path) -> None:
             blocks.append(("kv", f"endpoint: {f.get('endpoint')}"))
         blocks.append(("kv", f"evidence: {f.get('proof', '')[:200]}"))
         blocks.append(("kv", f"remediation: {f.get('remediation', '')[:200]}"))
+        fx = fix_for(f)
+        if fx["after"]:
+            blocks.append(("kv", f"fix (instead of): {fx['before'][:180]}"))
+            blocks.append(("kv", f"fix (do this): {fx['after'][:400]}"))
 
     blocks.append(("h2", "11. CWE mapping"))
     for k, v in _cwe_map(audit).items():

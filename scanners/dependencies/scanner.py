@@ -45,6 +45,77 @@ def load_advisories() -> dict:
     return data.get("advisories", {}) or {}
 
 
+_SKIP = {".git", "node_modules", "__pycache__", ".venv", "venv", "env", ".tox",
+         ".mypy_cache", ".pytest_cache", "dist", "build", ".next", "staticfiles",
+         "vendor"}
+
+
+def _walk(root: Path, max_depth: int = 5, skip: set = _SKIP):
+    """BFS directories up to max_depth, skipping venv/cache dirs."""
+    queue = [(root, 0)]
+    while queue:
+        cur, depth = queue.pop(0)
+        yield cur
+        if depth >= max_depth:
+            continue
+        try:
+            children = sorted(cur.iterdir(), key=lambda p: p.name)
+        except OSError:
+            continue
+        for child in children:
+            if child.is_dir() and child.name not in skip and not child.name.startswith("."):
+                queue.append((child, depth + 1))
+
+
+_VENV_NAMES = {".venv", "venv", "env", ".env", "virtualenv", ".virtualenv"}
+
+
+def _venv_inventory(root: Path, max_depth: int = 4) -> tuple[list[dict], list[str]]:
+    """Best-effort: read installed distributions from any venv site-packages
+    inside the project (Name/Version from *.dist-info/METADATA)."""
+    deps: list[dict] = []
+    sources: list[str] = []
+    seen: set[str] = set()
+    queue: list[tuple[Path, int]] = [(root, 0)]
+    while queue:
+        cur, depth = queue.pop(0)
+        if depth < max_depth:
+            try:
+                children = [c for c in sorted(cur.iterdir(), key=lambda p: p.name)
+                            if c.is_dir() and c.name not in {".git", "node_modules",
+                                                             "__pycache__", ".tox"}]
+            except OSError:
+                children = []
+            queue.extend((c, depth + 1) for c in children)
+        if cur.name not in _VENV_NAMES:
+            continue
+        for sp in list(cur.glob("Lib/site-packages")) + \
+                list(cur.glob("lib/python*/site-packages")):
+            if not sp.is_dir():
+                continue
+            rel = sp.relative_to(root).as_posix()
+            sources.append(f"{rel} (installed environment inventory)")
+            for meta in sorted(sp.glob("*.dist-info/METADATA")) + \
+                    sorted(sp.glob("*.egg-info/PKG-INFO")):
+                try:
+                    name = version = None
+                    for line in meta.read_text(errors="replace").splitlines():
+                        if line.startswith("Name:"):
+                            name = line[5:].strip()
+                        elif line.startswith("Version:"):
+                            version = line[8:].strip()
+                        elif line == "":
+                            break
+                    if name and name.lower() not in seen and len(deps) < 400:
+                        seen.add(name.lower())
+                        deps.append({"name": name,
+                                     "specifier": f"=={version}" if version else "",
+                                     "line": meta.name})
+                except OSError:
+                    continue
+    return deps, sources
+
+
 def _parse_pinned(specifier: str) -> str | None:
     """Return exact version if the specifier pins one (== / lockfile)."""
     spec = (specifier or "").strip()
@@ -68,36 +139,43 @@ class DependencyScanner(BaseScanner):
         advisories = load_advisories()
         root = Path(context.source_dir)
 
-        # Collect all declared dependencies (reuse discovery parser).
+        # Collect all declared dependencies (reuse discovery parser).  Manifests
+        # are searched recursively so projects nested in subfolders are covered.
         deps: list[dict] = []
         sources: list[str] = []
-        for req_file in list(root.glob("requirements.txt")) + list(root.glob("requirements/*.txt")) \
-                + list(root.glob("requirements-*.txt")):
-            if req_file.is_file():
-                deps.extend(parse_requirements_txt(_read(req_file), req_file.parent))
-                sources.append(req_file.relative_to(root).as_posix())
-        if (root / "pyproject.toml").is_file():
-            deps.extend(_deps_from_pyproject(_read(root / "pyproject.toml")))
-            sources.append("pyproject.toml")
-        if (root / "Pipfile").is_file():
-            import re
-            for line in _read(root / "Pipfile").splitlines():
-                m = re.match(r'^\s*"?([A-Za-z0-9._-]+)"?\s*=\s*"?([^"#\n]*)', line)
-                if m and not m.group(1).startswith(("[", "python_version")):
-                    deps.append({"name": m.group(1),
-                                 "specifier": m.group(2).strip().strip('"').strip("*"),
-                                 "line": line})
-            sources.append("Pipfile")
-        if (root / "poetry.lock").is_file():
-            try:
-                import tomllib
-                lock = tomllib.loads(_read(root / "poetry.lock", 2_000_000))
-                for pkg in lock.get("package", []):
-                    deps.append({"name": pkg.get("name", ""), "specifier": f"=={pkg.get('version')}",
-                                 "line": "poetry.lock"})
-                sources.append("poetry.lock")
-            except Exception as exc:  # noqa: BLE001
-                context.log("WARN", f"poetry.lock unreadable: {exc}")
+        for dirpath in _walk(root):
+            rel = dirpath.relative_to(root).as_posix()
+            for req_file in sorted(dirpath.glob("requirements*.txt")):
+                if req_file.is_file():
+                    deps.extend(parse_requirements_txt(_read(req_file), req_file.parent))
+                    sources.append(req_file.relative_to(root).as_posix())
+            if (dirpath / "pyproject.toml").is_file():
+                deps.extend(_deps_from_pyproject(_read(dirpath / "pyproject.toml")))
+                sources.append(f"{rel}/pyproject.toml")
+            if (dirpath / "Pipfile").is_file():
+                import re
+                for line in _read(dirpath / "Pipfile").splitlines():
+                    m = re.match(r'^\s*"?([A-Za-z0-9._-]+)"?\s*=\s*"?([^"#\n]*)', line)
+                    if m and not m.group(1).startswith(("[", "python_version")):
+                        deps.append({"name": m.group(1),
+                                     "specifier": m.group(2).strip().strip('"').strip("*"),
+                                     "line": line})
+                sources.append(f"{rel}/Pipfile")
+            if (dirpath / "poetry.lock").is_file():
+                try:
+                    import tomllib
+                    lock = tomllib.loads(_read(dirpath / "poetry.lock", 2_000_000))
+                    for pkg in lock.get("package", []):
+                        deps.append({"name": pkg.get("name", ""), "specifier": f"=={pkg.get('version')}",
+                                     "line": "poetry.lock"})
+                    sources.append(f"{rel}/poetry.lock")
+                except Exception as exc:  # noqa: BLE001
+                    context.log("WARN", f"poetry.lock unreadable: {exc}")
+
+        if not deps:
+            # No manifests anywhere: inventory the project's installed venv(s)
+            # so the scan still has real packages to check.
+            deps, sources = _venv_inventory(root)
 
         if not deps:
             result.status = "SKIPPED"
