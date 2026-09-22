@@ -104,10 +104,12 @@ def _venv_pythons(*roots: Path):
                 yield str(cand)
 
 
-def _build_isolated_venv(django_version: str | None, drf: bool) -> str | None:
-    """Best-effort isolated venv with the detected Django version (+DRF), so a
-    project with no usable venv can still be started for DAST.  Never touches
-    the auditor's or the project's environment."""
+def _build_isolated_venv(django_version: str | None, drf: bool,
+                         databases: list | None = None,
+                         project_root: Path | None = None) -> str | None:
+    """Best-effort isolated venv with the detected Django version (+DRF, +DB
+    drivers), so a project with no usable venv can still be started for DAST.
+    Never touches the auditor's or the project's environment."""
     import tempfile
     dest = Path(tempfile.mkdtemp(prefix="audit-sandbox-")) / "venv"
     try:
@@ -119,12 +121,64 @@ def _build_isolated_venv(django_version: str | None, drf: bool) -> str | None:
     pkgs = [f"django=={django_version}" if django_version else "django"]
     if drf:
         pkgs.append("djangorestframework")
+    for db in (databases or []):
+        db = (db or "").lower()
+        if "postgres" in db:
+            pkgs.append("psycopg2-binary")
+        elif "mysql" in db or "mariadb" in db:
+            pkgs.append("pymysql")
     try:
         subprocess.run([str(pip), "install", "--disable-pip-version-check", "-q", *pkgs],
                        capture_output=True, timeout=420, check=True)
     except Exception:  # noqa: BLE001
         return None
-    return str(dest / ("Scripts/python.exe" if IS_WINDOWS else "bin/python"))
+
+    # Best-effort: also install the project's declared requirements so its
+    # imports resolve.  A failing manifest falls back to per-package installs.
+    if project_root is not None:
+        for manifest in _find_manifests(project_root):
+            r = subprocess.run([str(pip), "install", "--disable-pip-version-check",
+                                "-q", "-r", str(manifest)],
+                               capture_output=True, timeout=420)
+            if r.returncode != 0:
+                for spec in _manifest_specs(manifest):
+                    subprocess.run([str(pip), "install", "--disable-pip-version-check",
+                                    "-q", spec], capture_output=True, timeout=120)
+
+    py = str(dest / ("Scripts/python.exe" if IS_WINDOWS else "bin/python"))
+    return py if _has_django(py) else None
+
+
+def _find_manifests(project_root: Path, max_depth: int = 3) -> list[Path]:
+    out: list[Path] = []
+    queue: list[tuple[Path, int]] = [(project_root, 0)]
+    while queue and len(out) < 3:
+        cur, depth = queue.pop(0)
+        out.extend(sorted(cur.glob("requirements*.txt")))
+        if depth < max_depth:
+            try:
+                children = [c for c in sorted(cur.iterdir(), key=lambda p: p.name)
+                            if c.is_dir() and c.name not in SKIP_DIR_NAMES
+                            and not c.name.startswith(".")]
+            except OSError:
+                children = []
+            queue.extend((c, depth + 1) for c in children)
+    return out
+
+
+def _manifest_specs(manifest: Path) -> list[str]:
+    specs = []
+    try:
+        for line in manifest.read_text(errors="replace").splitlines():
+            line = line.split("#", 1)[0].strip()
+            if not line or line.startswith(("-", "git+", "http")):
+                continue
+            specs.append(line)
+            if len(specs) >= 40:
+                break
+    except OSError:
+        pass
+    return specs
 
 
 def _pick_python(project: Path, manage_root: Path, profile: dict | None) -> tuple[str, str]:
@@ -137,8 +191,12 @@ def _pick_python(project: Path, manage_root: Path, profile: dict | None) -> tupl
             return cand, "project/system interpreter with django"
     # No interpreter has django: build an isolated venv with detected version.
     ver = (profile or {}).get("django_version_hint") or None
+    if ver:
+        import re
+        ver = re.sub(r"^[^0-9]+", "", ver).strip() or None   # '==4.2.1' -> '4.2.1'
     drf = bool((profile or {}).get("api"))
-    iso = _build_isolated_venv(ver, drf)
+    dbs = (profile or {}).get("databases") or []
+    iso = _build_isolated_venv(ver, drf, dbs, project_root=manage_root)
     if iso:
         return iso, "isolated venv (auto-installed django)"
     return candidates[0], "no interpreter with django found"
@@ -190,8 +248,14 @@ def start_application(source_dir: str, config: dict, source_type: str = "local",
     env = dict(os.environ)
     env.setdefault("PYTHONUNBUFFERED", "1")
     env.setdefault("DJANGO_ALLOWED_HOSTS", "127.0.0.1,localhost")
+    # operator-provided env for the sandboxed app (e.g. point it at a test DB)
+    for k, v in (dast_cfg.get("env") or {}).items():
+        env[str(k)] = str(v)
     python, py_note = _pick_python(project, manage_root, profile)
-    cmd = [python, "manage.py", "runserver", f"127.0.0.1:{port}", "--noreload"]
+    # --skip-checks: DAST needs the app *served*; blocking on config system
+    # checks (admin.E403 etc.) would refuse to boot apps we still want to probe.
+    cmd = [python, "manage.py", "runserver", f"127.0.0.1:{port}", "--noreload",
+           "--skip-checks"]
     log_path = manage_root / ".audit-runserver.log"
     try:
         logf = open(log_path, "wb")

@@ -24,6 +24,8 @@ dast:
   allow_local_runserver: true      # fallback when Docker is unavailable
   # allow_local_runserver_github: false   # keep false: GitHub sources DAST in containers
   timeout: 300
+  # env:                            # injected into the sandboxed app process,
+  #   AUDIT_FORCE_SQLITE: "1"       # e.g. point it at a test database
   # zap_api_url: http://zap:8090   # optional OWASP ZAP integration
 
 requirements:

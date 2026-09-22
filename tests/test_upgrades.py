@@ -65,3 +65,12 @@ def test_fix_examples_specific():
 def test_fix_examples_fallback():
     fx = fix_for({"title": "Something brand new"})
     assert fx["after"].startswith("Review the flagged code")
+
+
+def test_manifest_specs(tmp_path: Path):
+    m = tmp_path / "requirements.txt"
+    m.write_text("django==4.2.1\n# comment\nrequests>=2\n-r extra.txt\ngit+https://x/y.git\n",
+                 encoding="utf-8")
+    from scanners.dast.sandbox import _manifest_specs
+    specs = _manifest_specs(m)
+    assert specs == ["django==4.2.1", "requests>=2"]

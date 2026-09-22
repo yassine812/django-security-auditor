@@ -40,6 +40,12 @@ DATABASES = {
         "PORT": "5432",
     }
 }
+# Optional sandbox helper: let the audit platform boot this fixture against an
+# in-memory DB when the real one is unreachable.  Kept AFTER the assignment so
+# the static settings parser still sees the (vulnerable) top-level DATABASES.
+if os.environ.get("AUDIT_FORCE_SQLITE"):
+    DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3",
+                             "NAME": ":memory:"}}
 
 SESSION_COOKIE_SECURE = False
 CSRF_COOKIE_SECURE = False
