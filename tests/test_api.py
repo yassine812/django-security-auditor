@@ -89,9 +89,18 @@ def test_create_and_fetch_audit(server):
 
     report = client.get(f"/api/reports/{audit_id}/html", headers=h)
     assert report.status_code == 200
-    assert "Executive summary" in report.text
+    assert "Synthèse" in report.text and "Résultats par axe" in report.text
     pdf = client.get(f"/api/reports/{audit_id}/pdf", headers=h)
     assert pdf.status_code == 200
+    pdf_full = client.get(f"/api/reports/{audit_id}/pdf-full", headers=h)
+    assert pdf_full.status_code == 200
+    assert len(pdf_full.content) > len(pdf.content)          # détail > synthèse
+
+    # 4-axis attribution is part of the API payload (used by the dashboard)
+    detail = client.get(f"/api/audits/{audit_id}", headers=h).json()
+    assert len(detail["axes"]) == 4
+    assert all(1 <= f["axis"] <= 4 for f in detail["findings"])
+    assert all(1 <= r["axis"] <= 4 for r in detail["requirement_results"])
 
     projects = client.get("/api/projects", headers=h).json()
     assert any(p["name"] == "vuln" for p in projects["projects"])

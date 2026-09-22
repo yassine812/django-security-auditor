@@ -126,7 +126,9 @@ def build_app(store: AuditStore, config_path: str | None = None,
             audit = store.load(audit_id)
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="audit not found")
-        return audit.to_dict()
+        # enrich with the 4-axis attribution (same logic as the reports)
+        from apps.audits.axes import enrich
+        return enrich(audit.to_dict())
 
     def _sub(audit_id: str, attr: str, request: Request):
         auth(request)

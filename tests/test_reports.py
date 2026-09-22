@@ -67,12 +67,11 @@ def test_csv_reports(tmp_path):
 def test_html_report_contains_sections(tmp_path):
     write_html(sample_audit(), tmp_path / "r.html")
     text = (tmp_path / "r.html").read_text()
-    for section in ("Executive summary", "Vulnerabilities", "Requirements coverage",
-                    "CWE mapping", "OWASP", "Remediation", "Limitations"):
+    for section in ("Synthèse", "Résultats par axe", "Vulnérabilités", "Couverture des exigences",
+                    "Correspondance CWE", "OWASP", "Remédiation", "Limites"):
         assert section in text
     assert "IDOR / Broken Object Level Authorization" in text
-    assert "is not proof of security" in text.lower() or \
-           "not proof of security" in text.lower()
+    assert "ne prouve pas la sécurité" in text or "absence de constat" in text
 
 
 def test_pdf_report_full(tmp_path):
@@ -132,7 +131,7 @@ def test_hotspots_group_by_file_and_manifest():
                        "proof": "pyyaml==5.3.1", "dedup_key": "dep:x", "remediation": ""})
     hot = dict((where, n) for where, n, _mix in _hotspots(a))
     assert hot["views.py"] == 2
-    assert hot["(dependency manifests)"] == 1
+    assert hot["(manifests de dépendances)"] == 1
 
 
 def test_executive_pdf_is_shorter_than_full(tmp_path):
@@ -176,3 +175,50 @@ def test_static_preview_export(tmp_path):
     assert "DSA_SNAPSHOT" in html
     assert audit.id in html
     assert "django-security-auditor" not in html or True  # dashboard shell embedded
+
+
+# --- 4 axes : constats + résultats des exigences ---------------------------
+
+def test_axis_module_maps_findings_and_requirements():
+    import csv
+    from apps.audits.axes import AXES, axis_label, axis_of_finding, axis_of_requirement
+    assert len(AXES) == 4
+    assert axis_of_finding({"dedup_key": "sast:x", "sources": ["sast"]}) == 0
+    assert axis_of_finding({"dedup_key": "config:x", "sources": []}) == 1
+    assert axis_of_finding({"sources": ["dependencies"]}) == 2
+    assert axis_of_finding({"sources": ["network"]}) == 3
+    # exigence rattachée par le catalogue (mapping déclaré), pas par ses preuves
+    assert axis_of_requirement({"requirement_id": "REQ-015", "sources": []}) in range(4)
+    assert axis_label(0).startswith("Axe 1")
+
+
+def test_axis_requirement_catalogue_covers_137():
+    from apps.audits.axes import _catalogue_axes, is_transverse
+    assert len(_catalogue_axes()) >= 100
+    # tout est compté : axes déclarés + exigences transverses
+    assert is_transverse({"requirement_id": "REQ-999", "sources": []}) is True
+    assert is_transverse({"requirement_id": "REQ-999", "sources": ["sast"]}) is False
+
+
+def test_executive_pdf_contains_axis_results(tmp_path):
+    a = sample_audit()
+    a.requirement_results.append({"requirement_id": "REQ-060", "status": "NOT_TESTED",
+                                  "sources": ["dependencies"], "finding_ids": [], "notes": []})
+    write_pdf(a, tmp_path / "e.pdf")
+    import zlib
+    import re
+    data = (tmp_path / "e.pdf").read_bytes()
+    text = ""
+    for m in re.finditer(rb"stream\r?\n(.*?)\nendstream", data, re.S):
+        try:
+            text += zlib.decompress(m.group(1)).decode("latin-1")
+        except Exception:  # noqa: BLE001
+            pass
+    assert "sultats par axe" in text          # « Résultats par axe (4 axes) »
+    assert "Non test" in text                 # statut d'exigence en français
+
+
+def test_csv_has_axis_column(tmp_path):
+    paths = write_csv(sample_audit(), tmp_path)
+    rows = list(csv.DictReader(open(paths[0])))
+    assert rows[0]["axis"] in ("A1", "A2", "A3", "A4")

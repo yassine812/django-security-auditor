@@ -1,8 +1,11 @@
-"""Report generation: PDF, HTML, JSON, CSV (spec 27).
+"""Génération des rapports : PDF, HTML, JSON, CSV.
 
-All reports are derived from the persisted audit state.  The PDF/HTML reports
-contain every section required by the specification, including limitations:
-the platform never claims the application is secure - it reports coverage.
+Tous les rapports sont dérivés de l'état d'audit persisté.  Les rapports
+PDF/HTML (en français) contiennent les sections exigées par la spécification,
+y compris les limites : la plateforme ne prétend jamais que l'application est
+sûre — elle rapporte la couverture réellement obtenue.
+
+JSON et CSV restent en anglais (clés stables, lisibles par machine/Excel).
 """
 from __future__ import annotations
 
@@ -13,6 +16,8 @@ import json
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from apps.audits.axes import (AXES, AXIS_TOOLS, axis_label, axis_of_finding,
+                              axis_of_requirement, axis_short, is_transverse)
 from apps.audits.models import Audit, AuditStore
 from apps.reports.fix_examples import fix_for
 
@@ -21,6 +26,38 @@ SEV_COLORS = {"Critical": "#7f1d1d", "High": "#b91c1c", "Medium": "#d97706",
 STATUS_COLORS = {"PASS": "#059669", "FAIL": "#dc2626", "PARTIAL": "#d97706",
                  "NOT_TESTED": "#6b7280", "NOT_APPLICABLE": "#9ca3af",
                  "MANUAL_REVIEW": "#7c3aed"}
+
+# --- vocabulaire français (affichage ; les clés internes restent anglaises) ---
+SEV_FR = {"Critical": "Critique", "High": "Élevé", "Medium": "Moyen",
+          "Low": "Faible", "Info": "Info"}
+STATUS_FR = {"PASS": "Vérifié", "FAIL": "Échec", "PARTIAL": "Partiel",
+             "NOT_TESTED": "Non testé", "MANUAL_REVIEW": "Revue manuelle",
+             "NOT_APPLICABLE": "Non applicable"}
+SEVERITY_ORDER = ["Critical", "High", "Medium", "Low", "Info"]
+SEVERITY_MEANING = {
+    "Critical": "Exploitable immédiatement, impact grave — corriger en priorité absolue",
+    "High": "Faiblesse sérieuse, exploitable — corriger avant mise en production",
+    "Medium": "Faiblesse réelle, impact limité — corriger au prochain sprint",
+    "Low": "Durcissement / bonnes pratiques",
+    "Info": "Élément à revoir, pas une violation",
+}
+STATUS_MEANING = {
+    "PASS": "vérifié par des preuves automatiques",
+    "FAIL": "violation confirmée",
+    "PARTIAL": "couverture partielle",
+    "NOT_TESTED": "aucune couverture automatique — point ouvert",
+    "MANUAL_REVIEW": "vérification humaine requise",
+    "NOT_APPLICABLE": "non applicable à ce projet",
+}
+SEV_RANK = {s: i for i, s in enumerate(SEVERITY_ORDER)}
+
+
+def sev_fr(sev: str) -> str:
+    return SEV_FR.get(sev, sev or "")
+
+
+def status_fr(status: str) -> str:
+    return STATUS_FR.get(status, status or "")
 
 
 # ---------------------------------------------------------------------------
@@ -52,85 +89,57 @@ def _owasp_map(audit: Audit) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 4-axis grouping (Code / Configuration / Dependencies / Network+DAST)
+# 4 axes (Code / Configuration / Dépendances / Réseau+DAST)
 # ---------------------------------------------------------------------------
 
-AXES = [
-    ("Axe 1 — Code (SAST)", "sast"),
-    ("Axe 2 — Configuration & secrets", "configuration"),
-    ("Axe 3 — Dependencies", "dependencies"),
-    ("Axe 4 — Network, DAST & security tests", "network"),
-]
-
-
 def _axis_index(item: dict) -> int:
-    dk = (item.get("dedup_key") or "")
-    src = set(item.get("sources") or [])
-    if dk.startswith("sast:") or "sast" in src:
-        return 0
-    if dk.startswith("config:") or "configuration" in src:
-        return 1
-    if dk.startswith("dep:") or "dependencies" in src:
-        return 2
-    return 3
+    """Axe d'un constat (0-3) — logique partagée avec le tableau de bord."""
+    return axis_of_finding(item)
 
 
 def _axis_groups(audit: Audit) -> list[list[dict]]:
     groups: list[list[dict]] = [[] for _ in AXES]
-    for f in sorted(audit.findings, key=lambda x: x["severity"]):
+    for f in _sorted_findings(audit):
         groups[_axis_index(f)].append(f)
     return groups
 
 
-def _axis_req_groups(audit: Audit) -> list[list[dict]]:
+def _axis_req_groups(audit: Audit) -> tuple[list[list[dict]], list[dict]]:
+    """Exigences par axe (catalogue des 137) + exigences transverses (revue manuelle)."""
     groups: list[list[dict]] = [[] for _ in AXES]
+    transverse: list[dict] = []
     for r in audit.requirement_results:
-        groups[_axis_index(r)].append(r)
-    return groups
+        if is_transverse(r):
+            transverse.append(r)
+        else:
+            groups[axis_of_requirement(r)].append(r)
+    return groups, transverse
+
+
+def _axis_result_line(reqs: list[dict]) -> str:
+    """'Vérifié 5 · Échec 20 · Non testé 12' pour un axe."""
+    c = Counter(r["status"] for r in reqs)
+    parts = [f"{status_fr(s)} {c[s]}" for s in
+             ("PASS", "FAIL", "PARTIAL", "NOT_TESTED", "MANUAL_REVIEW") if c.get(s)]
+    return " · ".join(parts) or "aucune exigence"
 
 
 def _limitations(audit: Audit) -> list[str]:
     items = []
     for job in audit.jobs:
         if job["status"] in ("FAILED", "SKIPPED"):
-            items.append(f"{job['name']}: {job['status']} - {job.get('error') or 'not run'}")
+            items.append(f"{job['name']} : {job['status']} — {job.get('error') or 'non exécuté'}")
     n_not_tested = _status_counts(audit).get("NOT_TESTED", 0)
     n_manual = _status_counts(audit).get("MANUAL_REVIEW", 0)
     if n_not_tested:
-        items.append(f"{n_not_tested} requirements could not be tested automatically and "
-                     "remain NOT_TESTED - absence of findings is not proof of security.")
+        items.append(f"{n_not_tested} exigences n'ont pas pu être testées automatiquement "
+                     "et restent NON TESTÉES — l'absence de constat ne prouve pas la sécurité.")
     if n_manual:
-        items.append(f"{n_manual} requirements require manual review.")
-    items.append("DAST probes are heuristic; a clean result does not guarantee absence of "
-                 "vulnerabilities.")
-    items.append("Network scanning was limited to explicitly authorized targets.")
+        items.append(f"{n_manual} exigences nécessitent une revue manuelle.")
+    items.append("Les sondes DAST sont heuristiques : un résultat propre ne garantit pas "
+                 "l'absence de vulnérabilités.")
+    items.append("L'analyse réseau a été limitée aux cibles explicitement autorisées.")
     return items
-
-
-# ---------------------------------------------------------------------------
-# Severity / axis vocabulary shared by every report format
-# ---------------------------------------------------------------------------
-
-SEVERITY_ORDER = ["Critical", "High", "Medium", "Low", "Info"]
-SEVERITY_MEANING = {
-    "Critical": "Exploitable now, severe impact - patch immediately",
-    "High": "Serious weakness, likely exploitable - fix before release",
-    "Medium": "Real weakness with limited impact - schedule a fix",
-    "Low": "Hardening / best practice",
-    "Info": "Review input, not a violation",
-}
-AXIS_TOOLS = {
-    0: "SAST (code patterns, taint)",
-    1: "Settings / secrets scanner",
-    2: "Dependency + advisory scanner",
-    3: "Port scanner + DAST + security tests",
-}
-SEV_RANK = {s: i for i, s in enumerate(SEVERITY_ORDER)}
-
-
-def _axis_short(item: dict) -> str:
-    """A1..A4 - the same labels the dashboard uses."""
-    return f"A{_axis_index(item) + 1}"
 
 
 def _pct(n: int, total: int) -> str:
@@ -138,7 +147,7 @@ def _pct(n: int, total: int) -> str:
 
 
 def _location(item: dict) -> str:
-    """Best available 'where' for a finding: file:line > endpoint > manifest/proof."""
+    """Meilleur « où » disponible : fichier:ligne > endpoint > manifeste/preuve."""
     f = item.get("file")
     if f:
         line = item.get("line")
@@ -147,9 +156,9 @@ def _location(item: dict) -> str:
         return str(item["endpoint"])
     srcs = set(item.get("sources") or [])
     if srcs & {"dependencies"}:
-        return f"dependency manifest - {item.get('proof', '')}".strip(" -")
+        return f"manifeste de dépendances — {item.get('proof', '')}".strip(" —")
     if srcs & {"network"}:
-        return item.get("proof") or "authorized target"
+        return item.get("proof") or "cible autorisée"
     return item.get("proof") or "-"
 
 
@@ -159,7 +168,7 @@ def _sorted_findings(audit: Audit) -> list[dict]:
 
 
 def _hotspots(audit: Audit, limit: int = 10) -> list[tuple[str, int, str]]:
-    """Files (or endpoints) carrying the most findings: (where, count, severity mix)."""
+    """Fichiers (ou endpoints) portant le plus de constats : (où, nombre, mix sévérités)."""
     groups: dict[str, list[dict]] = defaultdict(list)
     for f in audit.findings:
         if f.get("file"):
@@ -167,16 +176,16 @@ def _hotspots(audit: Audit, limit: int = 10) -> list[tuple[str, int, str]]:
         elif f.get("endpoint"):
             key = str(f["endpoint"])
         elif "dependencies" in (f.get("sources") or []):
-            key = "(dependency manifests)"
+            key = "(manifests de dépendances)"
         elif f.get("sources"):
             key = f"({f['sources'][0]})"
         else:
-            key = "(no location)"
+            key = "(sans emplacement)"
         groups[key].append(f)
     rows = []
     for key, fs in groups.items():
         mix = Counter(x["severity"] for x in fs)
-        mix_txt = ", ".join(f"{s}: {mix[s]}" for s in SEVERITY_ORDER if mix.get(s))
+        mix_txt = ", ".join(f"{sev_fr(s)} {mix[s]}" for s in SEVERITY_ORDER if mix.get(s))
         rows.append((key, len(fs), mix_txt))
     rows.sort(key=lambda r: (-r[1], r[0]))
     return rows[:limit]
@@ -191,7 +200,7 @@ def write_json(audit: Audit, path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# CSV
+# CSV (clés anglaises stables + colonne axis)
 # ---------------------------------------------------------------------------
 
 def write_csv(audit: Audit, dirpath: Path) -> list[str]:
@@ -199,11 +208,12 @@ def write_csv(audit: Audit, dirpath: Path) -> list[str]:
     fp = dirpath / "findings.csv"
     with open(fp, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
-        w.writerow(["id", "title", "severity", "confidence", "category", "cwe", "owasp",
+        w.writerow(["id", "axis", "title", "severity", "confidence", "category", "cwe", "owasp",
                     "requirements", "sources", "file", "line", "endpoint", "status",
                     "retest_status", "remediation"])
         for f in audit.findings:
-            w.writerow([f["id"], f["title"], f["severity"], f["confidence"], f["category"],
+            w.writerow([f["id"], axis_short(_axis_index(f)), f["title"], f["severity"],
+                        f["confidence"], f["category"],
                         ";".join(f.get("cwe", [])), f.get("owasp", ""),
                         ";".join(f.get("requirement_ids", [])), ";".join(f.get("sources", [])),
                         f.get("file") or "", f.get("line") or "", f.get("endpoint") or "",
@@ -214,9 +224,10 @@ def write_csv(audit: Audit, dirpath: Path) -> list[str]:
     rp = dirpath / "requirements.csv"
     with open(rp, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
-        w.writerow(["requirement_id", "status", "sources", "findings", "notes"])
+        w.writerow(["requirement_id", "axis", "status", "sources", "findings", "notes"])
         for r in audit.requirement_results:
-            w.writerow([r["requirement_id"], r["status"], ";".join(r.get("sources", [])),
+            w.writerow([r["requirement_id"], axis_short(axis_of_requirement(r)), r["status"],
+                        ";".join(r.get("sources", [])),
                         ";".join(r.get("finding_ids", [])),
                         " | ".join(r.get("notes", []))[:500]])
     paths.append(str(rp))
@@ -234,66 +245,76 @@ def write_html(audit: Audit, path: Path) -> None:
 
     cards = "".join(
         f'<div class="card" style="border-left:6px solid {SEV_COLORS[s]}">'
-        f'<div class="num">{sev.get(s, 0)}</div><div>{s}</div></div>'
-        for s in ("Critical", "High", "Medium", "Low", "Info"))
+        f'<div class="num">{sev.get(s, 0)}</div><div>{sev_fr(s)}</div></div>'
+        for s in SEVERITY_ORDER)
     req_cards = "".join(
         f'<div class="card"><div class="num">{st.get(s, 0)}</div>'
-        f'<div style="color:{STATUS_COLORS[s]}">{s.replace("_", " ")}</div></div>'
+        f'<div style="color:{STATUS_COLORS[s]}">{status_fr(s)}</div>'
+        f'<div class="small">{s}</div></div>'
         for s in ("PASS", "FAIL", "PARTIAL", "NOT_TESTED", "MANUAL_REVIEW"))
 
     findings_rows = "".join(
         f"<tr><td>{e(f['id'])}</td><td>{e(f['title'])}</td>"
-        f"<td style='color:{SEV_COLORS.get(f['severity'], '#000')}'>{e(f['severity'])}</td>"
+        f"<td style='color:{SEV_COLORS.get(f['severity'], '#000')}'>{e(sev_fr(f['severity']))}</td>"
         f"<td>{e(f['confidence'])}</td>"
-        f"<td>{e(AXES[_axis_index(f)][0])}<div class='small'>{e(', '.join(f.get('sources', [])))}</div></td>"
+        f"<td>{e(axis_label(_axis_index(f)))}<div class='small'>{e(', '.join(f.get('sources', [])))}</div></td>"
         f"<td>{e(', '.join(f.get('cwe', [])))}</td>"
         f"<td>{e(f.get('owasp', ''))}</td>"
         f"<td>{e(', '.join(f.get('requirement_ids', [])))}</td>"
         f"<td><code>{e(_location(f))}</code></td>"
         f"<td><code>{e((f.get('proof') or '')[:160])}</code></td></tr>"
-        for f in sorted(audit.findings, key=lambda x: x["severity"]))
+        for f in _sorted_findings(audit))
 
-    # ---- 4-axis sections --------------------------------------------------
+    # ---- sections 4 axes (constats + résultats des exigences) -------------
     fg = _axis_groups(audit)
-    rg = _axis_req_groups(audit)
+    rg, transverse = _axis_req_groups(audit)
     axes_html = ""
-    for (name, _key), fs, rs in zip(AXES, fg, rg):
+    for i, ((name, _key), fs, rs) in enumerate(zip(AXES, fg, rg)):
         stc = Counter(r["status"] for r in rs)
         sevc = Counter(f["severity"] for f in fs)
+        sevc_txt = ", ".join(sev_fr(k) + ": " + str(v) for k, v in sevc.items()) or "aucun"
         mini = " &middot; ".join(
-            f"<span style='color:{STATUS_COLORS[s]}'>{stc.get(s, 0)} {s.replace('_', ' ')}</span>"
+            f"<span style='color:{STATUS_COLORS[s]}'>{stc.get(s, 0)} {status_fr(s)}</span>"
             for s in ("PASS", "FAIL", "PARTIAL", "NOT_TESTED", "MANUAL_REVIEW"))
         rows = "".join(
             f"<tr><td>{e(f['title'])}</td>"
-            f"<td style='color:{SEV_COLORS.get(f['severity'], '#000')}'>{e(f['severity'])}</td>"
+            f"<td style='color:{SEV_COLORS.get(f['severity'], '#000')}'>{e(sev_fr(f['severity']))}</td>"
             f"<td>{e(f['confidence'])}</td>"
-            f"<td><code>{e(f.get('file') or f.get('endpoint') or '')}"
-            f"{(':' + str(f['line'])) if f.get('line') else ''}</code></td>"
+            f"<td><code>{e(_location(f))}</code></td>"
             f"<td><code>{e((f.get('proof') or '')[:120])}</code></td>"
             f"<td>{e(fix_for(f)['after'][:220])}</td></tr>"
             for f in fs)
-        axes_html += f"""<h2>{name}</h2>
-<p class="small" style="font-size:12px">{len(fs)} finding(s) &mdash;
-{', '.join(f'{k}: {v}' for k, v in sevc.items()) or 'clean'} &nbsp;|&nbsp;
-requirements: {mini}</p>
-<table><tr><th>Finding</th><th>Severity</th><th>Confidence</th><th>Location</th>
-<th>Vulnerable code</th><th>Exact fix</th></tr>
-{rows or '<tr><td colspan=6>No findings on this axis</td></tr>'}</table>
+        axes_html += f"""<h2>{e(name)} — résultats</h2>
+<p class="small" style="font-size:12px">{len(fs)} constat(s) ({e(sevc_txt)}) &nbsp;|&nbsp;
+{len(rs)} exigence(s) de cet axe : {mini}</p>
+<table><tr><th>Constat</th><th>Sévérité</th><th>Confiance</th><th>Emplacement</th>
+<th>Code / preuve</th><th>Correction exacte</th></tr>
+{rows or '<tr><td colspan=6>Aucun constat sur cet axe</td></tr>'}</table>
 """
+    if transverse:
+        stc = Counter(r["status"] for r in transverse)
+        mini_t = " &middot; ".join(
+            f"<span style='color:{STATUS_COLORS[s]}'>{stc.get(s, 0)} {status_fr(s)}</span>"
+            for s in ("PASS", "FAIL", "PARTIAL", "NOT_TESTED", "MANUAL_REVIEW"))
+        axes_html += (f"""<h2>Exigences transverses — résultats</h2>
+<p class="small" style="font-size:12px">{len(transverse)} exigence(s) sans scanner dédié
+(processus, gouvernance, revue manuelle) : {mini_t}</p>""")
     fix_blocks = "".join(
         (lambda fx: f"""<div class=\"banner\" style=\"border-left:6px solid {SEV_COLORS.get(f['severity'],'#334155')}\">
- <b>[{e(f['severity'])}] {e(f['title'])}</b> &mdash; <code>{e(f.get('file') or f.get('endpoint') or '')}{(':' + str(f['line'])) if f.get('line') else ''}</code><br>
- {('<b>Vulnerable code:</b> <code>' + e(f.get('proof') or '') + '</code><br>') if f.get('proof') else ''}
- {('<b>Why it matters:</b> ' + e(fx['problem']) + '<br>') if fx['problem'] else ''}
- <b>Instead of:</b><pre style="background:#0b1220;padding:8px;border-radius:6px;overflow:auto">{e(fx['before'])}</pre>
- <b>Do this:</b><pre style="background:#0b1220;padding:8px;border-radius:6px;overflow:auto">{e(fx['after'])}</pre>
- <b>Remediation:</b> {e(f.get('remediation', ''))}
+ <b>[{e(sev_fr(f['severity']))}] {e(f['title'])}</b> &mdash; <code>{e(_location(f))}</code><br>
+ {('<b>Code vulnérable :</b> <code>' + e(f.get('proof') or '') + '</code><br>') if f.get('proof') else ''}
+ {(('<b>Pourquoi c&#39;est dangereux :</b> ' + e(fx['problem']) + '<br>') if fx['problem'] else '')}
+ <b>Au lieu de :</b><pre style=\"background:#0b1220;padding:8px;border-radius:6px;overflow:auto\">{e(fx['before'])}</pre>
+ <b>Faire ceci :</b><pre style=\"background:#0b1220;padding:8px;border-radius:6px;overflow:auto\">{e(fx['after'])}</pre>
+ <b>Remédiation :</b> {e(f.get('remediation', ''))}
  </div>""")(fix_for(f))
-        for f in sorted(audit.findings, key=lambda x: x["severity"]))
+        for f in _sorted_findings(audit))
 
     req_rows = "".join(
         f"<tr><td>{e(r['requirement_id'])}</td>"
-        f"<td style='color:{STATUS_COLORS.get(r['status'], '#000')}'>{e(r['status'])}</td>"
+        f"<td>{e(axis_label(axis_of_requirement(r)))}</td>"
+        f"<td style='color:{STATUS_COLORS.get(r['status'], '#000')}'>{e(status_fr(r['status']))}"
+        f"<div class='small'>{e(r['status'])}</div></td>"
         f"<td>{e(', '.join(r.get('sources', [])))}</td>"
         f"<td>{e(' | '.join(r.get('notes', []))[:300])}</td></tr>"
         for r in audit.requirement_results)
@@ -305,32 +326,39 @@ requirements: {mini}</p>
     _total = len(audit.findings)
     _sev = _severity_counts(audit)
     sev_meaning_rows = "".join(
-        f"<tr><td style='color:{SEV_COLORS.get(s, '#000')}'><b>{s}</b></td><td>{_sev.get(s, 0)}</td>"
+        f"<tr><td style='color:{SEV_COLORS.get(s, '#000')}'><b>{e(sev_fr(s))}</b>"
+        f"<div class='small'>{s}</div></td><td>{_sev.get(s, 0)}</td>"
         f"<td>{_pct(_sev.get(s, 0), _total)}</td><td>{e(SEVERITY_MEANING[s])}</td></tr>"
         for s in SEVERITY_ORDER)
     axis_share_rows = "".join(
         f"<tr><td>{e(name)}</td><td>{len(fs)}</td><td>{_pct(len(fs), _total)}</td>"
+        f"<td>{len(rs)} exigences : {e(_axis_result_line(rs))}</td>"
         f"<td>{e(AXIS_TOOLS[i])}</td></tr>"
-        for i, ((name, _k), fs) in enumerate(zip(AXES, _axis_groups(audit))))
+        for i, ((name, _k), fs, rs) in enumerate(zip(AXES, fg, rg))) + (
+        f"<tr><td>Exigences transverses (aucun scanner dédié)</td><td>-</td><td>-</td>"
+        f"<td>{len(transverse)} exigences : {e(_axis_result_line(transverse))}</td>"
+        f"<td>revue manuelle</td></tr>" if transverse else "")
     priority_rows = "".join(
         f"<tr><td style='color:{SEV_COLORS.get(f['severity'], '#000')}'>"
-        f"<b>{e(f['severity'])}</b></td><td>{e(AXES[_axis_index(f)][0])}</td>"
+        f"<b>{e(sev_fr(f['severity']))}</b></td><td>{e(axis_short(_axis_index(f)))} "
+        f"{e(axis_label(_axis_index(f)))}</td>"
         f"<td><code>{e(_location(f))}</code></td><td>{e(f['title'])}</td>"
         f"<td>{e((f.get('remediation') or '')[:200])}</td></tr>"
         for f in _sorted_findings(audit) if f["severity"] in ("Critical", "High")) \
-        or "<tr><td colspan=5>No Critical or High finding.</td></tr>"
+        or "<tr><td colspan=5>Aucun constat Critique ou Élevé.</td></tr>"
     hotspot_rows = "".join(
         f"<tr><td><code>{e(where)}</code></td><td>{n}</td><td>{e(mix)}</td></tr>"
         for where, n, mix in _hotspots(audit, limit=15))
-    hotspot_html = ("<h3>Hotspot locations (most findings per file/endpoint)</h3>"
-                    "<table><tr><th>File / endpoint</th><th>Findings</th><th>Severity mix</th></tr>"
+    hotspot_html = ("<h3>Emplacements les plus touchés (fichiers / endpoints)</h3>"
+                    "<table><tr><th>Fichier / endpoint</th><th>Constats</th>"
+                    "<th>Mix sévérités</th></tr>"
                     f"{hotspot_rows}</table>") if hotspot_rows else ""
 
     project = audit.project or {}
     score = audit.score or {}
     doc = f"""<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8">
-<title>Security Audit Report - {e(audit.id)}</title>
+<html lang="fr"><head><meta charset="utf-8">
+<title>Rapport d'audit de sécurité - {e(audit.id)}</title>
 <style>
  body{{font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,sans-serif;margin:0;background:#0f172a;color:#e2e8f0}}
  .wrap{{max-width:1200px;margin:0 auto;padding:24px}}
@@ -338,6 +366,7 @@ requirements: {mini}</p>
  .cards{{display:flex;flex-wrap:wrap;gap:12px;margin:14px 0}}
  .card{{background:#1e293b;border-radius:8px;padding:10px 18px;min-width:110px}}
  .card .num{{font-size:26px;font-weight:700}}
+ .small{{font-size:11px;color:#94a3b8}}
  table{{border-collapse:collapse;width:100%;font-size:12px;margin-top:8px}}
  th,td{{border:1px solid #334155;padding:6px 8px;text-align:left;vertical-align:top}}
  th{{background:#1e293b}}
@@ -345,58 +374,59 @@ requirements: {mini}</p>
  .disclaimer{{background:#7c2d12;border-radius:8px;padding:10px 14px;font-size:13px}}
  code{{background:#0b1220;padding:1px 5px;border-radius:4px}}
 </style></head><body><div class="wrap">
-<h1>Django Security Audit Report</h1>
+<h1>Rapport d'audit de sécurité Django</h1>
 <div class="banner">
- <b>Audit:</b> {e(audit.id)} &nbsp; <b>Project:</b> {e(project.get('name'))} &nbsp;
- <b>Source:</b> {e(project.get('source_type'))} {e(project.get('repo_url') or project.get('path') or '')}
- {('<br><b>Commit:</b> <code>' + e(project.get('commit_sha')) + '</code> <b>Branch:</b> ' + e(project.get('branch'))) if project.get('commit_sha') else ''}
- <br><b>Created:</b> {e(audit.created_at)} &nbsp; <b>Status:</b> {e(audit.status)}
+ <b>Audit :</b> {e(audit.id)} &nbsp; <b>Projet :</b> {e(project.get('name'))} &nbsp;
+ <b>Source :</b> {e(project.get('source_type'))} {e(project.get('repo_url') or project.get('path') or '')}
+ {('<br><b>Commit :</b> <code>' + e(project.get('commit_sha')) + '</code> <b>Branche :</b> ' + e(project.get('branch'))) if project.get('commit_sha') else ''}
+ <br><b>Créé le :</b> {e(audit.created_at)} &nbsp; <b>Statut :</b> {e(audit.status)}
 </div>
 
-<h2>Executive summary</h2>
-<div class="banner">Security score: <b>{e(score.get('score'))}/{e(score.get('max', 100))}</b>
-(summary metric only - findings and requirement statuses are authoritative)</div>
-<table><tr><th>Severity</th><th>Findings</th><th>Share</th><th>What it means</th></tr>
+<h2>1. Synthèse</h2>
+<div class="banner">Score de sécurité : <b>{e(score.get('score'))}/{e(score.get('max', 100))}</b>
+(indicateur seulement — les constats et les statuts d'exigences font foi)</div>
+<table><tr><th>Sévérité</th><th>Constats</th><th>Part</th><th>Ce que cela signifie</th></tr>
 {sev_meaning_rows}</table>
-<h3>Where the findings come from (4 axes)</h3>
-<table><tr><th>Axis</th><th>Findings</th><th>Share</th><th>Engines</th></tr>
+<h3>2. Résultats par axe (4 axes)</h3>
+<table><tr><th>Axe</th><th>Constats</th><th>Part</th><th>Résultats des exigences</th><th>Outils</th></tr>
 {axis_share_rows}</table>
-<h3>Priority actions (Critical + High) with locations</h3>
-<table><tr><th>Severity</th><th>Axis</th><th>Where</th><th>Finding</th><th>Fix</th></tr>
+<h3>3. Actions prioritaires (Critique + Élevé) avec emplacements</h3>
+<table><tr><th>Sévérité</th><th>Axe</th><th>Emplacement</th><th>Constat</th><th>Correction</th></tr>
 {priority_rows}</table>
 {hotspot_html}
 <div class="cards">{cards}</div>
 <div class="cards">{req_cards}</div>
-<p>Requirements total: <b>{len(audit.requirement_results)}</b> &middot;
-Findings (deduplicated): <b>{len(audit.findings)}</b></p>
+<p>Exigences évaluées : <b>{len(audit.requirement_results)}</b> &middot;
+Constats (dédupliqués) : <b>{len(audit.findings)}</b></p>
 
 {axes_html}
 
-<h2>Scan environment / pipeline jobs</h2>
-<table><tr><th>Job</th><th>Status</th><th>Error</th></tr>{jobs_rows}</table>
+<h2>4. Environnement d'analyse / tâches du pipeline</h2>
+<table><tr><th>Tâche</th><th>Statut</th><th>Erreur</th></tr>{jobs_rows}</table>
 
-<h2>Vulnerabilities (deduplicated findings)</h2>
-<table><tr><th>ID</th><th>Title</th><th>Severity</th><th>Confidence</th><th>Axis / engine</th><th>CWE</th>
-<th>OWASP</th><th>Requirements</th><th>Location</th><th>Line</th><th>Vulnerable code</th></tr>
-{findings_rows or '<tr><td colspan=10>No findings</td></tr>'}</table>
+<h2>5. Vulnérabilités (constats dédupliqués)</h2>
+<table><tr><th>ID</th><th>Titre</th><th>Sévérité</th><th>Confiance</th><th>Axe / moteur</th><th>CWE</th>
+<th>OWASP</th><th>Exigences</th><th>Emplacement</th><th>Code / preuve</th></tr>
+{findings_rows or '<tr><td colspan=10>Aucun constat</td></tr>'}</table>
 
-<h2>How to fix (exact remediation)</h2>
-{fix_blocks or '<p>No findings to remediate.</p>'}
+<h2>6. Comment corriger (remédiation exacte)</h2>
+{fix_blocks or "<p>Aucun constat à corriger.</p>"}
 
-<h2>Requirements coverage ({len(audit.requirement_results)} requirements)</h2>
-<table><tr><th>Requirement</th><th>Status</th><th>Sources</th><th>Evidence / notes</th></tr>
+<h2>7. Couverture des exigences ({len(audit.requirement_results)} exigences)</h2>
+<table><tr><th>Exigence</th><th>Axe</th><th>Statut</th><th>Sources</th><th>Preuves / notes</th></tr>
 {req_rows}</table>
 
-<h2>CWE mapping</h2><ul>{''.join(f'<li><b>{e(k)}</b>: {len(v)} finding(s)</li>' for k, v in _cwe_map(audit).items())}</ul>
+<h2>8. Correspondance CWE</h2><ul>{''.join(f'<li><b>{e(k)}</b> : {len(v)} constat(s)</li>' for k, v in _cwe_map(audit).items())}</ul>
 
-<h2>OWASP Top 10 mapping</h2><ul>{''.join(f'<li><b>{e(k)}</b>: {len(v)} finding(s)</li>' for k, v in _owasp_map(audit).items())}</ul>
+<h2>9. Correspondance OWASP Top 10</h2><ul>{''.join(f'<li><b>{e(k)}</b> : {len(v)} constat(s)</li>' for k, v in _owasp_map(audit).items())}</ul>
 
-<h2>Remediation</h2><ul>{''.join(f"<li><b>{e(f['title'])}</b> ({e(f['severity'])}): {e(f.get('remediation', ''))}</li>" for f in audit.findings if f['severity'] in ('Critical', 'High'))}</ul>
+<h2>10. Remédiation prioritaire</h2><ul>{''.join(f"<li><b>{e(f['title'])}</b> ({e(sev_fr(f['severity']))}) : {e(f.get('remediation', ''))}</li>" for f in _sorted_findings(audit) if f['severity'] in ('Critical', 'High'))}</ul>
 
-<h2>Limitations</h2><ul>{''.join(f'<li>{e(x)}</li>' for x in _limitations(audit))}</ul>
-<div class="disclaimer">This report reflects automated and semi-automated verification only.
-NOT_TESTED and MANUAL_REVIEW items remain open. A high score does NOT mean the application
-is secure: absence of findings is not proof of security.</div>
+<h2>11. Limites</h2><ul>{''.join(f'<li>{e(x)}</li>' for x in _limitations(audit))}</ul>
+<div class="disclaimer">Ce rapport reflète uniquement une vérification automatique et
+semi-automatique. Les exigences NON TESTÉES et en REVUE MANUELLE restent ouvertes.
+Un score élevé ne signifie PAS que l'application est sûre : l'absence de constat
+ne prouve pas la sécurité.</div>
 </div></body></html>"""
     path.write_text(doc, encoding="utf-8")
 
@@ -406,16 +436,13 @@ is secure: absence of findings is not proof of security.</div>
 # ---------------------------------------------------------------------------
 
 def write_pdf(audit: Audit, path: Path, full: bool = False) -> None:
-    """Executive summary PDF (short, ~3-6 pages) or full detail PDF (full=True).
+    """PDF de synthèse (court, 3-6 pages) ou rapport détaillé complet (full=True).
 
-    The executive version answers 'what is critical, where is it, which axis,
-    how big is the share' and points to the HTML/JSON reports for evidence.
+    La version de synthèse répond à : qu'est-ce qui est critique, où, sur quel
+    axe, quelle part du total — et renvoie aux artefacts détaillés.
     """
     from apps.reports.pdf import render_pdf
-    if full:
-        blocks = _pdf_blocks_full(audit)
-    else:
-        blocks = _pdf_blocks_executive(audit)
+    blocks = _pdf_blocks_full(audit) if full else _pdf_blocks_executive(audit)
     path.write_bytes(render_pdf(blocks, f"Audit {audit.id}"))
 
 
@@ -427,110 +454,113 @@ def _pdf_blocks_executive(audit: Audit) -> list[tuple[str, str]]:
     total = len(audit.findings)
     blocks: list[tuple[str, str]] = []
 
-    blocks.append(("h1", "Django Security Audit - Executive Report"))
-    blocks.append(("body", f"Audit {audit.id} - created {audit.created_at}"))
-    blocks.append(("body", f"Project: {project.get('name')} "
-                           f"({project.get('source_type')}: "
+    blocks.append(("h1", "Rapport d'audit de sécurité Django — Synthèse"))
+    blocks.append(("body", f"Audit {audit.id} — créé le {audit.created_at}"))
+    blocks.append(("body", f"Projet : {project.get('name')} "
+                           f"({project.get('source_type')} : "
                            f"{project.get('repo_url') or project.get('path') or ''})"))
     if project.get("commit_sha"):
-        blocks.append(("body", f"Commit {project.get('commit_sha')} branch {project.get('branch')}"))
+        blocks.append(("body", f"Commit {project.get('commit_sha')} branche {project.get('branch')}"))
     blocks.append(("hr", ""))
 
-    # -- 1. summary ---------------------------------------------------------
-    blocks.append(("h2", "1. Summary"))
-    blocks.append(("body", f"Security score: {score.get('score')}/100 (indicator only - "
-                           "findings and requirement statuses are authoritative)."))
-    blocks.append(("body", f"{total} finding(s) across {len(audit.requirement_results)} "
-                           "evaluated requirements."))
-    blocks.append(("th:0,80,200,320", "Severity|Findings|Share|What it means"))
+    # -- 1. synthèse --------------------------------------------------------
+    blocks.append(("h2", "1. Synthèse"))
+    blocks.append(("body", f"Score de sécurité : {score.get('score')}/100 (indicateur seulement — "
+                           "les constats et les statuts d'exigences font foi)."))
+    blocks.append(("body", f"{total} constat(s) sur {len(audit.requirement_results)} "
+                           "exigences évaluées."))
+    blocks.append(("th:0,80,200,320", "Sévérité|Constats|Part|Ce que cela signifie"))
     for s in SEVERITY_ORDER:
         n = sev.get(s, 0)
         blocks.append((f"t:0,80,200,320",
-                       f"{s}|{n}|{_pct(n, total)}|{SEVERITY_MEANING[s]}"))
+                       f"{sev_fr(s)}|{n}|{_pct(n, total)}|{SEVERITY_MEANING[s]}"))
     blocks.append(("t:0,80,200,320", f"TOTAL|{total}|100%|"))
-    blocks.append(("body", "Requirements: " + ", ".join(
-        f"{k} {v}" for k, v in sorted(st.items()))))
+    blocks.append(("kv", "codes (JSON/CSV) : Critical=Critique, High=Élevé, Medium=Moyen, "
+                         "Low=Faible, Info=Info"))
+    blocks.append(("body", "Exigences : " + ", ".join(
+        f"{status_fr(k)} {v}" for k, v in sorted(st.items(), key=lambda kv: kv[0]))))
 
-    # -- 2. axes ------------------------------------------------------------
-    blocks.append(("h2", "2. Where the findings are (4 axes)"))
-    blocks.append(("th:0,140,190,250", "Axis|Findings|Share|Engines"))
-    for i, ((name, _key), fs) in enumerate(zip(AXES, _axis_groups(audit))):
+    # -- 2. résultats par axe ----------------------------------------------
+    blocks.append(("h2", "2. Résultats par axe (4 axes)"))
+    blocks.append(("th:0,195,250,495", "Axe|Constats|Exig.|Résultats des exigences (statuts)"))
+    rg, transverse = _axis_req_groups(audit)
+    for i, ((name, _key), fs, rs) in enumerate(zip(AXES, _axis_groups(audit), rg)):
         sevc = Counter(f["severity"] for f in fs)
-        mix = ", ".join(f"{s} {sevc[s]}" for s in SEVERITY_ORDER if sevc.get(s)) or "clean"
-        blocks.append(("t:0,140,190,250",
-                       f"{name}|{len(fs)}|{_pct(len(fs), total)}|{AXIS_TOOLS[i]} ({mix})"))
+        mix = ", ".join(f"{sev_fr(s)} {sevc[s]}" for s in SEVERITY_ORDER if sevc.get(s))
+        blocks.append(("t:0,195,250,495",
+                       f"{name}|{len(fs)} · {_pct(len(fs), total)}|{len(rs)}|"
+                       f"{_axis_result_line(rs)}"))
+        if mix:
+            blocks.append(("kv", f"      constats : {mix} | outils : {AXIS_TOOLS[i]}"))
+    if transverse:
+        blocks.append(("t:0,195,250,495",
+                       f"Exigences transverses (aucun scanner dédié)|-|-|{_axis_result_line(transverse)}"))
 
-    # -- 3. priority actions ------------------------------------------------
+    # -- 3. actions prioritaires -------------------------------------------
     prio = [f for f in _sorted_findings(audit) if f["severity"] in ("Critical", "High")]
-    blocks.append(("h2", "3. Priority actions (Critical + High)"))
+    blocks.append(("h2", "3. Actions prioritaires (Critique + Élevé)"))
     if not prio:
-        blocks.append(("body", "No Critical or High finding in this run - see the full report "
-                               "for Medium/Low hardening items."))
+        blocks.append(("body", "Aucun constat Critique ou Élevé sur ce run — voir le rapport "
+                               "complet pour les points Moyen/Faible."))
     else:
-        blocks.append(("th:0,45,75,255", "Sev|Axis|Where|Finding"))
+        blocks.append(("th:0,45,75,255", "Sévérité|Axe|Emplacement|Constat"))
         for f in prio[:30]:
-            axis_short = _axis_short(f)
             blocks.append(("t:0,45,75,255",
-                           f"{f['severity']}|{axis_short}|{_location(f)}|{f['title']}"))
+                           f"{sev_fr(f['severity'])}|{axis_short(_axis_index(f))}|"
+                           f"{_location(f)}|{f['title']}"))
             fix = (f.get("remediation") or "").strip()
             if fix:
-                blocks.append(("kv", f"      fix: {fix[:220]}"))
+                blocks.append(("kv", f"      correction : {fix[:220]}"))
         if len(prio) > 30:
-            blocks.append(("body", f"... and {len(prio) - 30} more Critical/High findings "
-                                   "(see the full report or findings.csv)."))
+            blocks.append(("body", f"... et {len(prio) - 30} autres constats Critique/Élevé "
+                                   "(voir le rapport complet ou findings.csv)."))
 
-    # -- 4. hotspot locations ----------------------------------------------
+    # -- 4. emplacements les plus touchés ----------------------------------
     hot = _hotspots(audit)
     if hot:
-        blocks.append(("h2", "4. Hotspot locations (most findings per file/endpoint)"))
-        blocks.append(("th:0,240,290,470", "File / endpoint|Findings|Severity mix|"))
+        blocks.append(("h2", "4. Emplacements les plus touchés (fichiers / endpoints)"))
+        blocks.append(("th:0,240,290,470", "Fichier / endpoint|Constats|Mix sévérités|"))
         for where, n, mix in hot:
             blocks.append(("t:0,240,290,470", f"{where}|{n}|{mix}|"))
 
-    # -- 5. requirements coverage ------------------------------------------
-    blocks.append(("h2", "5. Requirements coverage"))
-    blocks.append(("th:0,150,210,300", "Status|Requirements|Share|Meaning"))
-    status_meaning = {
-        "PASS": "verified by automated evidence",
-        "FAIL": "violation confirmed",
-        "PARTIAL": "partially covered",
-        "NOT_TESTED": "no automated coverage - open",
-        "MANUAL_REVIEW": "needs a human check",
-        "NOT_APPLICABLE": "not applicable to this project",
-    }
+    # -- 5. couverture des exigences ---------------------------------------
+    blocks.append(("h2", "5. Couverture des exigences"))
+    blocks.append(("th:0,150,210,300", "Statut|Exigences|Part|Signification"))
     for s in ("PASS", "FAIL", "PARTIAL", "NOT_TESTED", "MANUAL_REVIEW", "NOT_APPLICABLE"):
         n = st.get(s, 0)
         if not n:
             continue
         blocks.append(("t:0,150,210,300",
-                       f"{s}|{n}|{_pct(n, len(audit.requirement_results))}|{status_meaning[s]}"))
+                       f"{status_fr(s)} ({s})|{n}|"
+                       f"{_pct(n, len(audit.requirement_results))}|{STATUS_MEANING[s]}"))
     fails = [r["requirement_id"] for r in audit.requirement_results if r["status"] == "FAIL"]
     if fails:
-        blocks.append(("body", "FAILED requirements: " + ", ".join(fails[:40])
-                               + (f" (+{len(fails) - 40} more)" if len(fails) > 40 else "")))
+        blocks.append(("body", "Exigences en ÉCHEC : " + ", ".join(fails[:40])
+                               + (f" (+{len(fails) - 40} autres)" if len(fails) > 40 else "")))
 
-    # -- 6. coverage / jobs --------------------------------------------------
-    blocks.append(("h2", "6. Scanners and coverage"))
+    # -- 6. couverture des analyseurs --------------------------------------
+    blocks.append(("h2", "6. Analyseurs et couverture"))
     for j in audit.jobs:
-        blocks.append(("kv", f"{j['name']}: {j['status']}"
+        blocks.append(("kv", f"{j['name']} : {j['status']}"
                              + (f" ({j.get('error')})" if j.get("error") else "")))
 
-    # -- 7. limitations ------------------------------------------------------
-    blocks.append(("h2", "7. Limitations - what is NOT proven"))
+    # -- 7. limites ---------------------------------------------------------
+    blocks.append(("h2", "7. Limites — ce qui n'est PAS prouvé"))
     for x in _limitations(audit):
         blocks.append(("bullet", x))
 
-    # -- 8. where to look next ----------------------------------------------
-    blocks.append(("h2", "8. Full detail"))
-    blocks.append(("body", "Every finding with evidence, request/response, exact code fix and "
-                           "requirement mapping is in the detailed artefacts of this audit:"))
-    blocks.append(("kv", "reports/report.html - full detail, printable"))
-    blocks.append(("kv", "reports/report.pdf (this file) - executive summary"))
-    blocks.append(("kv", "reports/report-full.pdf - full detail as PDF"))
-    blocks.append(("kv", "reports/findings.csv - one row per finding (sort/filter in Excel)"))
-    blocks.append(("kv", "reports/report.json - machine-readable audit state"))
-    blocks.append(("body", "A high score or a lack of findings is NOT proof the application is "
-                           "secure. Untested and manual-review requirements remain open."))
+    # -- 8. où trouver le détail -------------------------------------------
+    blocks.append(("h2", "8. Détail complet"))
+    blocks.append(("body", "Chaque constat avec preuve, requête/réponse, correction exacte du "
+                           "code et rattachement aux exigences se trouve dans :"))
+    blocks.append(("kv", "reports/report.html — détail complet, imprimable"))
+    blocks.append(("kv", "reports/report.pdf (ce fichier) — synthèse"))
+    blocks.append(("kv", "reports/report-full.pdf — détail complet en PDF"))
+    blocks.append(("kv", "reports/findings.csv — une ligne par constat (Excel)"))
+    blocks.append(("kv", "reports/report.json — état d'audit lisible par machine"))
+    blocks.append(("body", "Un score élevé ou l'absence de constat ne prouve PAS que "
+                           "l'application est sûre. Les exigences non testées et en revue "
+                           "manuelle restent ouvertes."))
     return blocks
 
 
@@ -542,116 +572,124 @@ def _pdf_blocks_full(audit: Audit) -> list[tuple[str, str]]:
     st = _status_counts(audit)
     total = len(audit.findings)
 
-    blocks.append(("h1", "Django Security Audit Report"))
-    blocks.append(("body", f"Audit {audit.id} - created {audit.created_at}"))
+    blocks.append(("h1", "Rapport d'audit de sécurité Django — Détail complet"))
+    blocks.append(("body", f"Audit {audit.id} — créé le {audit.created_at}"))
 
-    blocks.append(("h2", "1. Executive summary"))
-    blocks.append(("body", f"Security score: {score.get('score')}/100 (summary metric only - "
-                           "findings and requirement statuses are authoritative)."))
-    blocks.append(("th:0,80,200,320", "Severity|Findings|Share|What it means"))
+    blocks.append(("h2", "1. Synthèse"))
+    blocks.append(("body", f"Score de sécurité : {score.get('score')}/100 (indicateur seulement — "
+                           "les constats et les statuts d'exigences font foi)."))
+    blocks.append(("th:0,80,200,320", "Sévérité|Constats|Part|Ce que cela signifie"))
     for s in SEVERITY_ORDER:
         n = sev.get(s, 0)
-        blocks.append(("t:0,80,200,320", f"{s}|{n}|{_pct(n, total)}|{SEVERITY_MEANING[s]}"))
-    blocks.append(("body", "Requirements: " + ", ".join(
-        f"{k}: {v}" for k, v in sorted(st.items()))))
+        blocks.append(("t:0,80,200,320",
+                       f"{sev_fr(s)} ({s})|{n}|{_pct(n, total)}|{SEVERITY_MEANING[s]}"))
+    blocks.append(("body", "Exigences : " + ", ".join(
+        f"{status_fr(k)} : {v}" for k, v in sorted(st.items()))))
 
-    blocks.append(("h2", "1bis. Results by axis (4 axes)"))
-    for (name, _key), fs, rs in zip(AXES, _axis_groups(audit), _axis_req_groups(audit)):
+    blocks.append(("h2", "1bis. Résultats par axe (4 axes)"))
+    rg, transverse = _axis_req_groups(audit)
+    for i, ((name, _key), fs, rs) in enumerate(zip(AXES, _axis_groups(audit), rg)):
         sevc = Counter(f["severity"] for f in fs)
-        stc = Counter(r["status"] for r in rs)
-        blocks.append(("kv", f"{name}: {len(fs)} finding(s) "
-                             f"[{', '.join(f'{k}: {v}' for k, v in sevc.items()) or 'clean'}]; "
-                             f"requirements [{', '.join(f'{k}: {v}' for k, v in stc.items())}]"))
+        mix = ", ".join(f"{sev_fr(k)} : {v}" for k, v in sevc.items()) or "aucun"
+        blocks.append(("kv", f"{name} : {len(fs)} constat(s) [{mix}] ; "
+                             f"{len(rs)} exigences [{_axis_result_line(rs)}] ; "
+                             f"outils : {AXIS_TOOLS[i]}"))
+    if transverse:
+        blocks.append(("kv", f"Exigences transverses (aucun scanner dédié) : "
+                             f"{len(transverse)} exigences [{_axis_result_line(transverse)}]"))
 
-    blocks.append(("h2", "2. Project information"))
-    blocks.append(("kv", f"name: {project.get('name')}"))
-    blocks.append(("kv", f"source: {project.get('source_type')} "
+    blocks.append(("h2", "2. Informations projet"))
+    blocks.append(("kv", f"nom : {project.get('name')}"))
+    blocks.append(("kv", f"source : {project.get('source_type')} "
                          f"{project.get('repo_url') or project.get('path') or ''}"))
     if project.get("commit_sha"):
-        blocks.append(("kv", f"commit: {project.get('commit_sha')} branch: {project.get('branch')}"))
+        blocks.append(("kv", f"commit : {project.get('commit_sha')} "
+                             f"branche : {project.get('branch')}"))
 
-    blocks.append(("h2", "3. Scan environment"))
+    blocks.append(("h2", "3. Environnement d'analyse"))
     for j in audit.jobs:
-        blocks.append(("kv", f"{j['name']}: {j['status']}"
+        blocks.append(("kv", f"{j['name']} : {j['status']}"
                              + (f" ({j.get('error')})" if j.get("error") else "")))
 
-    blocks.append(("h2", "4. Requirements coverage"))
-    blocks.append(("body", f"{len(audit.requirement_results)} requirements evaluated."))
+    blocks.append(("h2", "4. Couverture des exigences"))
+    blocks.append(("body", f"{len(audit.requirement_results)} exigences évaluées."))
     for r in audit.requirement_results:
         if r["status"] == "FAIL":
-            blocks.append(("kv", f"{r['requirement_id']} FAIL - {' | '.join(r['notes'])[:160]}"))
+            blocks.append(("kv", f"{r['requirement_id']} ÉCHEC - {' | '.join(r['notes'])[:160]}"))
 
-    blocks.append(("h2", "5. Requirements requiring manual review"))
+    blocks.append(("h2", "5. Exigences en revue manuelle"))
     for r in audit.requirement_results:
         if r["status"] == "MANUAL_REVIEW":
             blocks.append(("kv", f"{r['requirement_id']}"))
 
-    blocks.append(("h2", "6. SAST results"))
-    blocks.append(("body", f"Files scanned: {audit.sast_data.get('files_scanned', 'n/a')}, "
-                           f"findings attributed to SAST: "
+    blocks.append(("h2", "6. Résultats SAST"))
+    blocks.append(("body", f"Fichiers analysés : {audit.sast_data.get('files_scanned', 'n/a')}, "
+                           f"constats attribués au SAST : "
                            f"{sum(1 for f in audit.findings if 'sast' in f.get('sources', []))}"))
 
-    blocks.append(("h2", "7. Dependency results"))
+    blocks.append(("h2", "7. Résultats dépendances"))
     d = audit.dependencies_report or {}
-    blocks.append(("body", f"Packages: {d.get('total', 'n/a')}, pinned: {d.get('pinned', 'n/a')}, "
-                           f"unpinned: {d.get('unpinned', 'n/a')}, vulnerable entries: "
+    blocks.append(("body", f"Paquets : {d.get('total', 'n/a')}, épinglés : {d.get('pinned', 'n/a')}, "
+                           f"non épinglés : {d.get('unpinned', 'n/a')}, entrées vulnérables : "
                            f"{d.get('vulnerable', 'n/a')}"))
 
-    blocks.append(("h2", "8. Network results"))
+    blocks.append(("h2", "8. Résultats réseau"))
     n = audit.network_report or {}
     for host, info in (n.get("hosts") or {}).items():
         s = (info.get("summary") or {})
-        blocks.append(("kv", f"{host}: open={s.get('open')} closed={s.get('closed')} "
-                             f"filtered={s.get('filtered')} method={info.get('method')}"))
+        blocks.append(("kv", f"{host} : ouverts={s.get('open')} fermés={s.get('closed')} "
+                             f"filtrés={s.get('filtered')} méthode={info.get('method')}"))
 
-    blocks.append(("h2", "9. DAST results"))
+    blocks.append(("h2", "9. Résultats DAST"))
     da = audit.dast_report or {}
-    blocks.append(("body", f"base_url: {da.get('base_url', 'not started')}, checks: "
+    blocks.append(("body", f"base_url : {da.get('base_url', 'non démarré')}, contrôles : "
                            f"{da.get('checks_run', 0)}"))
 
-    blocks.append(("h2", "10. Vulnerabilities"))
+    blocks.append(("h2", "10. Vulnérabilités"))
     for f in _sorted_findings(audit):
-        blocks.append(("h3", f"[{f['severity']}/{f['confidence']}] {f['title']}"))
+        blocks.append(("h3", f"[{sev_fr(f['severity'])}/{f['confidence']}] {f['title']}"))
         blocks.append(("body", f"{f['description'][:300]}"))
-        blocks.append(("kv", f"axis: {AXES[_axis_index(f)][0]}  where: {_location(f)}"))
-        blocks.append(("kv", f"CWE: {', '.join(f.get('cwe', []))}  OWASP: {f.get('owasp', '')}  "
-                             f"requirements: {', '.join(f.get('requirement_ids', []))}"))
-        blocks.append(("kv", f"evidence: {f.get('proof', '')[:200]}"))
-        blocks.append(("kv", f"remediation: {f.get('remediation', '')[:200]}"))
+        blocks.append(("kv", f"axe : {axis_label(_axis_index(f))}  "
+                             f"emplacement : {_location(f)}"))
+        blocks.append(("kv", f"CWE : {', '.join(f.get('cwe', []))}  OWASP : {f.get('owasp', '')}  "
+                             f"exigences : {', '.join(f.get('requirement_ids', []))}"))
+        blocks.append(("kv", f"preuve : {f.get('proof', '')[:200]}"))
+        blocks.append(("kv", f"remédiation : {f.get('remediation', '')[:200]}"))
         fx = fix_for(f)
         if fx["after"]:
-            blocks.append(("kv", f"fix (instead of): {fx['before'][:180]}"))
-            blocks.append(("kv", f"fix (do this): {fx['after'][:400]}"))
+            blocks.append(("kv", f"au lieu de : {fx['before'][:180]}"))
+            blocks.append(("kv", f"faire ceci : {fx['after'][:400]}"))
 
-    blocks.append(("h2", "11. CWE mapping"))
+    blocks.append(("h2", "11. Correspondance CWE"))
     for k, v in _cwe_map(audit).items():
-        blocks.append(("kv", f"{k}: {len(v)} finding(s)"))
-    blocks.append(("h2", "12. OWASP mapping"))
+        blocks.append(("kv", f"{k} : {len(v)} constat(s)"))
+    blocks.append(("h2", "12. Correspondance OWASP"))
     for k, v in _owasp_map(audit).items():
-        blocks.append(("kv", f"{k}: {len(v)} finding(s)"))
+        blocks.append(("kv", f"{k} : {len(v)} constat(s)"))
 
-    blocks.append(("h2", "13. Remediation priorities"))
-    for f in audit.findings:
+    blocks.append(("h2", "13. Remédiation prioritaire"))
+    for f in _sorted_findings(audit):
         if f["severity"] in ("Critical", "High"):
-            blocks.append(("kv", f"- {f['title']}: {f.get('remediation', '')[:180]}"))
+            blocks.append(("kv", f"- {f['title']} : {f.get('remediation', '')[:180]}"))
 
     if audit.comparison:
-        blocks.append(("h2", "14. Retest results"))
+        blocks.append(("h2", "14. Résultats du retest"))
         c = audit.comparison
-        blocks.append(("body", f"fixed: {len(c.get('fixed', []))}, still present: "
-                               f"{len(c.get('still_present', []))}, new: {len(c.get('new', []))}"))
+        blocks.append(("body", f"corrigés : {len(c.get('fixed', []))}, toujours présents : "
+                               f"{len(c.get('still_present', []))}, nouveaux : {len(c.get('new', []))}"))
         for t in c.get("fixed", []):
-            blocks.append(("kv", f"FIXED: {t}"))
+            blocks.append(("kv", f"CORRIGÉ : {t}"))
         for t in c.get("still_present", []):
-            blocks.append(("kv", f"STILL PRESENT: {t}"))
+            blocks.append(("kv", f"TOUJOURS PRÉSENT : {t}"))
         for t in c.get("new", []):
-            blocks.append(("kv", f"NEW: {t}"))
+            blocks.append(("kv", f"NOUVEAU : {t}"))
 
-    blocks.append(("h2", "15. Limitations"))
+    blocks.append(("h2", "15. Limites"))
     for x in _limitations(audit):
         blocks.append(("bullet", x))
-    blocks.append(("body", "A high score or a lack of findings is NOT proof the application "
-                           "is secure. Untested and manual-review requirements remain open."))
+    blocks.append(("body", "Un score élevé ou l'absence de constat ne prouve PAS que "
+                           "l'application est sûre. Les exigences non testées et en revue "
+                           "manuelle restent ouvertes."))
     return blocks
 
 
@@ -667,8 +705,8 @@ def generate_all_reports(store: AuditStore, audit: Audit) -> dict:
     paths["html"] = str(d / "report.html")
     csv_paths = write_csv(audit, d)
     paths["csv"] = csv_paths[0]
-    write_pdf(audit, d / "report.pdf")                 # executive summary (short)
+    write_pdf(audit, d / "report.pdf")                  # synthèse (court)
     paths["pdf"] = str(d / "report.pdf")
-    write_pdf(audit, d / "report-full.pdf", full=True)  # every finding + evidence + fixes
+    write_pdf(audit, d / "report-full.pdf", full=True)  # détail complet
     paths["pdf_full"] = str(d / "report-full.pdf")
     return paths

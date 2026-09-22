@@ -58,12 +58,12 @@
 <header>
   <div class="logo">&#128737; Django Security <span>Auditor</span></div>
   <nav id="nav">
-    <a href="#/dashboard">Dashboard</a>
-    <a href="#/projects">Projects</a>
+    <a href="#/dashboard">Tableau de bord</a>
+    <a href="#/projects">Projets</a>
     <a href="#/audits">Audits</a>
-    <a href="#/settings">Settings</a>
+    <a href="#/settings">Paramètres</a>
   </nav>
-  <button class="btn sec" onclick="logout()">Sign out</button>
+  <button class="btn sec" onclick="logout()">Se déconnecter</button>
 </header>
 <main id="app"></main>
 
@@ -76,20 +76,26 @@
 const SNAP=window.DSA_SNAPSHOT||null;
 const API="";
 const SEV_ORDER=["Critical","High","Medium","Low","Info"];
+const SEV_FR={Critical:"Critique",High:"\u00c9lev\u00e9",Medium:"Moyen",Low:"Faible",Info:"Info"};
 const SEV_MEANING={
-  Critical:"Exploitable now, severe impact &mdash; patch immediately",
-  High:"Serious weakness, likely exploitable &mdash; fix before release",
-  Medium:"Real weakness, limited impact &mdash; schedule a fix",
-  Low:"Hardening / best practice",
-  Info:"Review input, not a violation"};
+  Critical:"Exploitable imm\u00e9diatement, impact grave &mdash; corriger en priorit\u00e9 absolue",
+  High:"Faiblesse s\u00e9rieuse, exploitable &mdash; corriger avant mise en production",
+  Medium:"Faiblesse r\u00e9elle, impact limit\u00e9 &mdash; corriger au prochain sprint",
+  Low:"Durcissement / bonnes pratiques",
+  Info:"\u00c9l\u00e9ment \u00e0 revoir, pas une violation"};
 const AXES=[
   {id:"A1",label:"A1 &middot; Code (SAST)",tools:"SAST"},
-  {id:"A2",label:"A2 &middot; Configuration &amp; secrets",tools:"settings scanner"},
-  {id:"A3",label:"A3 &middot; Dependencies",tools:"dependency scanner"},
-  {id:"A4",label:"A4 &middot; Network &amp; DAST",tools:"port scanner + DAST"}];
-const ST_MEANING={PASS:"verified with evidence",FAIL:"violation confirmed",
-  PARTIAL:"partially covered",NOT_TESTED:"no coverage &mdash; open",
-  MANUAL_REVIEW:"needs a human check",NOT_APPLICABLE:"not applicable"};
+  {id:"A2",label:"A2 &middot; Configuration &amp; secrets",tools:"analyseur de settings"},
+  {id:"A3",label:"A3 &middot; D\u00e9pendances",tools:"analyseur de d\u00e9pendances"},
+  {id:"A4",label:"A4 &middot; R\u00e9seau &amp; DAST",tools:"scanner de ports + DAST"}];
+const STATUS_ORDER=["PASS","FAIL","PARTIAL","NOT_TESTED","MANUAL_REVIEW","NOT_APPLICABLE"];
+const STATUS_FR={PASS:"V\u00e9rifi\u00e9",FAIL:"\u00c9chec",PARTIAL:"Partiel",
+  NOT_TESTED:"Non test\u00e9",MANUAL_REVIEW:"Revue manuelle",NOT_APPLICABLE:"Non applicable"};
+const ST_MEANING={PASS:"v\u00e9rifi\u00e9 avec preuves",FAIL:"violation confirm\u00e9e",
+  PARTIAL:"couverture partielle",NOT_TESTED:"aucune couverture &mdash; point ouvert",
+  MANUAL_REVIEW:"v\u00e9rification humaine requise",NOT_APPLICABLE:"non applicable"};
+function sevFr(s){return SEV_FR[s]||s;}
+function stFr(s){return STATUS_FR[s]||s;}
 let TOKEN=localStorage.getItem("dsa_token")||"";
 let filter={sev:"",axis:"",q:""};
 
@@ -98,26 +104,28 @@ function pct(n,total){return total?Math.round(100*n/total)+"%":"0%";}
 function sevRank(s){const i=SEV_ORDER.indexOf(s);return i<0?9:i;}
 function sortFindings(fs){return (fs||[]).slice().sort((a,b)=>sevRank(a.severity)-sevRank(b.severity)||String(a.title).localeCompare(String(b.title)));}
 function axisIdx(f){
-  const dk=(f.dedup_key||""),src=new Set(f.sources||[]);
+  if(f&&f.axis)return Math.max(0,Math.min(3,Number(f.axis)-1));   // fourni par l'API
+  const dk=((f&&f.dedup_key)||""),src=new Set((f&&f.sources)||[]);
   if(dk.startsWith("sast:")||src.has("sast"))return 0;
   if(dk.startsWith("config:")||src.has("configuration"))return 1;
   if(dk.startsWith("dep:")||src.has("dependencies"))return 2;
   return 3;
 }
+function axisLabelOf(f){return AXES[axisIdx(f)].label;}
 function axisLabel(f){return AXES[axisIdx(f)].label;}
 function axisShort(f){return AXES[axisIdx(f)].id;}
 function loc(f){
   if(f.file)return f.line?`${f.file}:${f.line}`:String(f.file);
   if(f.endpoint)return String(f.endpoint);
   const src=f.sources||[];
-  if(src.includes("dependencies")&&f.proof)return "manifest &middot; "+f.proof;
+  if(src.includes("dependencies")&&f.proof)return "manifeste &middot; "+f.proof;
   if(src.includes("network")&&f.proof)return f.proof;
   return "\u2014";
 }
 function engines(f){return (f.sources||[]).map(s=>`<span class="tag">${esc(s)}</span>`).join("");}
 function pill(t,cls){return `<span class="pill ${cls||""}">${esc(t)}</span>`;}
-function sevPill(s){return `<span class="pill sev-${esc(s)}">${esc(s)}</span>`;}
-function stPill(s){return `<span class="pill st-${esc(s)}">${esc(String(s).replace(/_/g," "))}</span>`;}
+function sevPill(s){return `<span class="pill sev-${esc(s)}">${esc(sevFr(s))}</span>`;}
+function stPill(s){return `<span class="pill st-${esc(s)}">${esc(stFr(s))}</span>`;}
 
 /* ------------------------------- api ------------------------------- */
 function snapshotApi(path){
@@ -156,11 +164,11 @@ async function downloadReport(id,fmt){
 function showLogin(){
   document.getElementById("app").innerHTML=`
   <div id="login" class="panel">
-    <h1>Sign in</h1>
-    <label>Username</label><input id="u" value="admin">
-    <label>Password</label><input id="p" type="password">
-    <p class="small muted">Default bootstrap credentials: admin / admin-audit-2026 (change immediately in production).</p>
-    <button class="btn" onclick="doLogin()">Sign in</button>
+    <h1>Connexion</h1>
+    <label>Utilisateur</label><input id="u" value="admin">
+    <label>Mot de passe</label><input id="p" type="password">
+    <p class="small muted">Identifiants par défaut : admin / admin-audit-2026 (à changer immédiatement en production).</p>
+    <button class="btn" onclick="doLogin()">Se connecter</button>
     <p id="lerr" class="sev-Critical"></p>
   </div>`;
 }
@@ -176,64 +184,93 @@ function severityCards(findings,auditId){
   SEV_ORDER.forEach(s=>counts[s]=0);
   findings.forEach(f=>counts[f.severity]=(counts[f.severity]||0)+1);
   return SEV_ORDER.map(s=>`
-    <div class="card click" onclick="goSev('${auditId}','${s}')" title="Show ${s} findings">
+    <div class="card click" onclick="goSev('${auditId}','${s}')" title="Voir les constats ${sevFr(s)}">
       <div class="num sev-${s}">${counts[s]||0}</div>
-      <div class="lbl">${s}</div>
-      <div class="pctx sev-${s}">${pct(counts[s]||0,total)} <span class="muted small">of ${total}</span></div>
+      <div class="lbl">${sevFr(s)}</div>
+      <div class="pctx sev-${s}">${pct(counts[s]||0,total)} <span class="muted small">sur ${total}</span></div>
       <div class="small muted">${SEV_MEANING[s]}</div>
     </div>`).join("");
 }
-function axisCards(findings){
-  const total=findings.length,per=AXES.map(()=>[]);
-  findings.forEach(f=>per[axisIdx(f)].push(f));
+function axisCards(findings,reqs){
+  const total=findings.length,perF=AXES.map(()=>[]),perR=AXES.map(()=>[]);
+  findings.forEach(f=>perF[axisIdx(f)].push(f));
+  (reqs||[]).filter(r=>!r.transverse).forEach(r=>perR[axisIdx(r)].push(r));
   return AXES.map((a,i)=>{
-    const fs=per[i],c={};SEV_ORDER.forEach(s=>c[s]=0);fs.forEach(f=>c[f.severity]=(c[f.severity]||0)+1);
-    const mix=SEV_ORDER.filter(s=>c[s]).map(s=>`<span class="sev-${s}">${s} ${c[s]}</span>`).join(" &middot; ")||"<span class='muted'>clean</span>";
+    const fs=perF[i],rs=perR[i],c={};
+    SEV_ORDER.forEach(s=>c[s]=0);fs.forEach(f=>c[f.severity]=(c[f.severity]||0)+1);
+    const mix=SEV_ORDER.filter(s=>c[s]).map(s=>`<span class="sev-${s}">${sevFr(s)} ${c[s]}</span>`).join(" &middot; ")||"<span class='muted'>aucun constat</span>";
+    const st={};rs.forEach(r=>st[r.status]=(st[r.status]||0)+1);
+    const res=STATUS_ORDER.filter(s=>st[s]).map(s=>`<span class="st-${s}">${stFr(s)} ${st[s]}</span>`).join(" &middot; ")||"<span class='muted'>aucune exigence</span>";
     return `<div class="card">
       <div class="num">${fs.length}</div>
       <div class="lbl">${a.label}</div>
-      <div class="pctx">${pct(fs.length,total)} <span class="muted small">of ${total}</span></div>
+      <div class="pctx">${pct(fs.length,total)} <span class="muted small">des constats</span></div>
       <div class="small muted">${a.tools}</div>
       <div class="small">${mix}</div>
+      <div class="small" style="margin-top:6px;border-top:1px solid var(--line);padding-top:6px">
+        <b>${rs.length} exigences</b><div>${res}</div></div>
     </div>`;}).join("");
+}
+function axisResultsTable(findings,reqs){
+  const total=findings.length,perF=AXES.map(()=>[]),perR=AXES.map(()=>[]);
+  const transverse=(reqs||[]).filter(r=>r.transverse);
+  findings.forEach(f=>perF[axisIdx(f)].push(f));
+  (reqs||[]).filter(r=>!r.transverse).forEach(r=>perR[axisIdx(r)].push(r));
+  return `<table><tr><th style="width:250px">Axe</th><th style="width:110px">Constats</th>
+    <th style="width:110px">Exigences</th><th>R\u00e9sultats des exigences</th><th style="width:230px">Outils</th></tr>
+    ${AXES.map((a,i)=>{
+      const rs=perR[i],st={};const c={};perF[i].forEach(f=>c[f.severity]=(c[f.severity]||0)+1);
+      rs.forEach(r=>st[r.status]=(st[r.status]||0)+1);
+      const res=STATUS_ORDER.filter(s=>st[s]).map(s=>`<span class="st-${s}">${stFr(s)} ${st[s]}</span>`).join(" &middot; ")||"<span class='muted'>aucune</span>";
+      const mix=SEV_ORDER.filter(s=>c[s]).map(s=>`<span class="sev-${s}">${sevFr(s)} ${c[s]}</span>`).join(", ")||"<span class='muted'>aucun constat</span>";
+      return `<tr><td><b>${a.label}</b><div class="small muted">${mix}</div></td>
+        <td>${perF[i].length}<div class="small muted">${pct(perF[i].length,total)}</div></td>
+        <td>${rs.length}</td><td class="small">${res}</td><td class="small muted">${a.tools}</td></tr>`;
+    }).join("")}
+    ${transverse.length?(()=>{const st={};transverse.forEach(r=>st[r.status]=(st[r.status]||0)+1);
+      const res=STATUS_ORDER.filter(s=>st[s]).map(s=>`<span class="st-${s}">${stFr(s)} ${st[s]}</span>`).join(" &middot; ");
+      return `<tr><td><b>Exigences transverses</b><div class="small muted">aucun scanner dédié : processus, gouvernance, revue manuelle</div></td>
+        <td>&ndash;</td><td>${transverse.length}</td><td class="small">${res}</td>
+        <td class="small muted">revue manuelle</td></tr>`;})():""}
+  </table>`;
 }
 function requirementCards(rr){
   const counts={};rr.forEach(r=>counts[r.status]=(counts[r.status]||0)+1);
-  return ["PASS","FAIL","PARTIAL","NOT_TESTED","MANUAL_REVIEW","NOT_APPLICABLE"].map(s=>`
+  return STATUS_ORDER.map(s=>`
     <div class="card">
       <div class="num st-${s}">${counts[s]||0}</div>
-      <div class="lbl">${s.replace(/_/g," ")}</div>
-      <div class="pctx">${pct(counts[s]||0,rr.length)} <span class="muted small">of ${rr.length}</span></div>
-      <div class="small muted">${ST_MEANING[s]}</div>
+      <div class="lbl">${stFr(s)}</div>
+      <div class="pctx">${pct(counts[s]||0,rr.length)} <span class="muted small">de ${rr.length}</span></div>
+      <div class="small muted">${ST_MEANING[s]} <span class="tag">${s}</span></div>
     </div>`).join("");
 }
 function priorityTable(findings){
   const prio=sortFindings(findings).filter(f=>f.severity==="Critical"||f.severity==="High");
-  if(!prio.length)return "<div class='panel muted'>No Critical or High finding in this audit.</div>";
+  if(!prio.length)return "<div class='panel muted'>Aucun constat Critique ou \u00c9lev\u00e9 dans cet audit.</div>";
   const shown=prio.slice(0,15);
-  return `<table><tr><th style="width:90px">Severity</th><th style="width:60px">Axis</th>
-    <th style="width:250px">Where</th><th>Finding / fix</th></tr>
+  return `<table><tr><th style="width:100px">S\u00e9v\u00e9rit\u00e9</th><th style="width:60px">Axe</th>
+    <th style="width:250px">Emplacement</th><th>Constat / correction</th></tr>
     ${shown.map(f=>`<tr>
       <td>${sevPill(f.severity)}</td>
       <td class="small" title="${esc(AXES[axisIdx(f)].tools)}">${axisShort(f)}</td>
       <td class="small"><code>${esc(loc(f))}</code></td>
       <td>${esc(f.title)}<div class="small muted">${esc((f.remediation||f.description||"").slice(0,200))}</div></td>
     </tr>`).join("")}</table>
-    ${prio.length>shown.length?`<p class="small muted">+ ${prio.length-shown.length} more Critical/High findings &mdash; see the <b>findings</b> tab or the report.</p>`:""}`;
+    ${prio.length>shown.length?`<p class="small muted">+ ${prio.length-shown.length} autres constats Critique/\u00c9lev\u00e9 &mdash; voir l'onglet <b>constats</b> ou le rapport.</p>`:""}`;
 }
 function hotspotTable(findings){
   const groups={};
   findings.forEach(f=>{
     const key=f.file?String(f.file):(f.endpoint?String(f.endpoint)
-      :(axisIdx(f)===2?"(dependency manifests)":"(no location)"));
+      :(axisIdx(f)===2?"(manifests de d\u00e9pendances)":"(sans emplacement)"));
     (groups[key]=groups[key]||[]).push(f);
   });
   const rows=Object.entries(groups).sort((a,b)=>b[1].length-a[1].length).slice(0,10);
-  if(!rows.length)return "<div class='panel muted'>No locations recorded.</div>";
-  return `<table><tr><th>File / endpoint</th><th style="width:110px">Findings</th><th style="width:340px">Severity mix</th></tr>
+  if(!rows.length)return "<div class='panel muted'>Aucun emplacement enregistr\u00e9.</div>";
+  return `<table><tr><th>Fichier / endpoint</th><th style="width:110px">Constats</th><th style="width:340px">Mix s\u00e9v\u00e9rit\u00e9s</th></tr>
     ${rows.map(([where,fs])=>{
       const c={};fs.forEach(f=>c[f.severity]=(c[f.severity]||0)+1);
-      const mix=SEV_ORDER.filter(s=>c[s]).map(s=>`<span class="sev-${s}">${s} ${c[s]}</span>`).join(" &middot; ");
+      const mix=SEV_ORDER.filter(s=>c[s]).map(s=>`<span class="sev-${s}">${sevFr(s)} ${c[s]}</span>`).join(" &middot; ");
       return `<tr><td><code>${esc(where)}</code></td><td>${fs.length}</td><td class="small">${mix}</td></tr>`;
     }).join("")}</table>`;
 }
@@ -250,33 +287,35 @@ async function pageDashboard(){
 }
 function auditOverview(d,showHeader){
   const fs=d.findings||[],sc=d.score||{},rr=d.requirement_results||[];
-  return `${showHeader?`<h1>Dashboard &mdash; ${esc(d.id)} ${d.status!=="COMPLETE"?pill(d.status):""}</h1>`:""}
-  ${(d.project&&d.project.name)?`<p class="small muted">Project <b>${esc(d.project.name)}</b> &middot; ${esc(d.project.source_type||"")} ${d.project.commit_sha?`&middot; commit <code>${esc(d.project.commit_sha.slice(0,12))}</code>`:""}</p>`:""}
-  ${d.status!=="COMPLETE"?'<div class="panel">Pipeline still running &mdash; this page auto-refreshes.</div>':""}
+  const crit=fs.filter(f=>f.severity==="Critical"||f.severity==="High").length;
+  return `${showHeader?`<h1>Tableau de bord &mdash; ${esc(d.id)} ${d.status!=="COMPLETE"?pill(d.status):""}</h1>`:""}
+  ${(d.project&&d.project.name)?`<p class="small muted">Projet <b>${esc(d.project.name)}</b> &middot; ${esc(d.project.source_type||"")} ${d.project.commit_sha?`&middot; commit <code>${esc(d.project.commit_sha.slice(0,12))}</code>`:""}</p>`:""}
+  ${d.status!=="COMPLETE"?'<div class="panel">Le pipeline tourne encore &mdash; cette page se rafraîchit automatiquement.</div>':""}
   <div class="grid cards">
-    <div class="card"><div class="num">${sc.score!=null?sc.score:"&ndash;"}</div><div class="lbl">Security score /100</div>
-      <div class="small muted">Indicator only: findings and requirement statuses are authoritative.</div></div>
-    <div class="card"><div class="num">${fs.length}</div><div class="lbl">Findings</div>
-      <div class="small muted">${fs.filter(f=>f.severity==="Critical"||f.severity==="High").length} Critical+High &middot; ${fs.filter(f=>f.file).length} with a file location</div></div>
-    <div class="card"><div class="num">${rr.length}</div><div class="lbl">Requirements evaluated</div>
-      <div class="small muted">of the 137-requirement catalogue</div></div>
-    <div class="card"><div class="num">${(d.jobs||[]).filter(j=>j.status==="SUCCESS").length}/${(d.jobs||[]).length}</div><div class="lbl">Pipeline jobs OK</div>
-      <div class="small muted">${(d.jobs||[]).filter(j=>j.status==="FAILED").length} failed/skipped</div></div>
+    <div class="card"><div class="num">${sc.score!=null?sc.score:"&ndash;"}</div><div class="lbl">Score de sécurité /100</div>
+      <div class="small muted">Indicateur seulement : les constats et les statuts d'exigences font foi.</div></div>
+    <div class="card"><div class="num">${fs.length}</div><div class="lbl">Constats</div>
+      <div class="small muted">${crit} Critique+\u00c9lev\u00e9 &middot; ${fs.filter(f=>f.file).length} avec un fichier précis</div></div>
+    <div class="card"><div class="num">${rr.length}</div><div class="lbl">Exigences évaluées</div>
+      <div class="small muted">sur le catalogue des 137 exigences</div></div>
+    <div class="card"><div class="num">${(d.jobs||[]).filter(j=>j.status==="SUCCESS").length}/${(d.jobs||[]).length}</div><div class="lbl">Tâches du pipeline OK</div>
+      <div class="small muted">${(d.jobs||[]).filter(j=>j.status==="FAILED").length} en échec / ignorées</div></div>
   </div>
-  <h2>Findings by severity (share of total &mdash; click to filter)</h2>
+  <h2>Constats par sévérité (part du total &mdash; cliquez pour filtrer)</h2>
   <div class="grid cards">${severityCards(fs,d.id)}</div>
-  <h2>Findings by axis (which scanner produced them)</h2>
-  <div class="grid cards">${axisCards(fs)}</div>
-  <h2>Priority actions &mdash; Critical &amp; High with locations</h2>
+  <h2>Résultats par axe (4 axes) &mdash; constats et exigences</h2>
+  <div class="grid cards">${axisCards(fs,rr)}</div>
+  ${axisResultsTable(fs,rr)}
+  <h2>Actions prioritaires &mdash; Critique &amp; \u00c9lev\u00e9 avec emplacement</h2>
   ${priorityTable(fs)}
-  <h2>Hotspot locations &mdash; where the findings are</h2>
+  <h2>Emplacements les plus touchés</h2>
   ${hotspotTable(fs)}
-  <h2>Requirements (${rr.length})</h2>
+  <h2>Exigences (${rr.length})</h2>
   <div class="grid cards">${requirementCards(rr)}</div>
-  <h2>Pipeline</h2><table><tr><th>Job</th><th style="width:120px">Status</th><th>Error</th></tr>
+  <h2>Tâches du pipeline</h2><table><tr><th>Tâche</th><th style="width:120px">Statut</th><th>Erreur</th></tr>
   ${(d.jobs||[]).map(j=>`<tr><td>${esc(j.name)}</td><td>${pill(j.status)}</td><td class="small muted">${esc(j.error||"")}</td></tr>`).join("")}</table>
-  <h2>Structured log</h2><pre>${(d.logs||[]).map(l=>`[${esc((l.ts||"").slice(11,19))}] ${esc(l.level)} ${esc(l.message)}`).join("\n")}</pre>
-  <div class="disclaimer" style="margin-top:18px">The score is a summary metric only. NOT_TESTED and MANUAL_REVIEW requirements remain open: absence of findings is not proof of security.</div>`;
+  <h2>Journal structuré</h2><pre>${(d.logs||[]).map(l=>`[${esc((l.ts||"").slice(11,19))}] ${esc(l.level)} ${esc(l.message)}`).join("\n")}</pre>
+  <div class="disclaimer" style="margin-top:18px">Le score est un indicateur de synthèse. Les exigences NON TESTÉES et en REVUE MANUELLE restent ouvertes : l'absence de constat ne prouve pas la sécurité.</div>`;
 }
 function goSev(id,sev){
   if(!id)return;
@@ -286,25 +325,25 @@ function goSev(id,sev){
 }
 async function pageProjects(){
   const d=await api("/api/projects");
-  document.getElementById("app").innerHTML=`<h1>Projects</h1>
-  <table><tr><th>Name</th><th>Type</th><th>Path / repo</th><th>Commit</th></tr>
+  document.getElementById("app").innerHTML=`<h1>Projets</h1>
+  <table><tr><th>Nom</th><th>Type</th><th>Chemin / d\u00e9p\u00f4t</th><th>Commit</th></tr>
   ${(d.projects||[]).map(p=>`<tr><td>${esc(p.name||"")}</td><td>${esc(p.source_type||"")}</td><td class="small">${esc(p.repo_url||p.path||"")}</td><td class="small">${esc((p.commit_sha||"").slice(0,12))}</td></tr>`).join("")||"<tr><td colspan=4 class='muted'>No projects yet.</td></tr>"}</table>`;
 }
 async function pageAudits(){
   const d=await api("/api/audits");
   document.getElementById("app").innerHTML=`<h1>Audits</h1>
   <div class="panel">
-    <h2 style="margin-top:0">Create audit</h2>
+    <h2 style="margin-top:0">Cr\u00e9er un audit</h2>
     <div class="row">
-      <div><label>Project name</label><input id="np" placeholder="my-django-project"></div>
-      <div><label>Source type</label><select id="st"><option value="local">Local folder</option><option value="github">GitHub</option></select></div>
-      <div><label>Local path / GitHub URL</label><input id="pth" placeholder="./project or https://github.com/org/repo"></div>
+      <div><label>Nom du projet</label><input id="np" placeholder="mon-projet-django"></div>
+      <div><label>Type de source</label><select id="st"><option value="local">Dossier local</option><option value="github">GitHub</option></select></div>
+      <div><label>Chemin local / URL GitHub</label><input id="pth" placeholder="./projet ou https://github.com/org/repo"></div>
     </div>
-    <label><input type="checkbox" id="authz" style="width:auto"> I confirm that I am authorized to security-test this application and its infrastructure.</label>
-    <button class="btn" onclick="createAudit()">Start audit</button> <span id="cerr" class="sev-Critical"></span>
+    <label><input type="checkbox" id="authz" style="width:auto"> Je confirme \u00eatre autoris\u00e9 \u00e0 tester la s\u00e9curit\u00e9 de cette application et de son infrastructure.</label>
+    <button class="btn" onclick="createAudit()">D\u00e9marrer l'audit</button> <span id="cerr" class="sev-Critical"></span>
   </div>
-  <table><tr><th>ID</th><th>Project</th><th>Created</th><th>Status</th><th></th></tr>
-  ${(d.audits||[]).map(a=>`<tr><td><a href="#/audits/${esc(a.id)}">${esc(a.id)}</a></td><td>${esc(a.project||"")}</td><td class="small">${esc(a.created_at||"")}</td><td>${pill(a.status||"")}</td><td><a href="#/audits/${esc(a.id)}">open</a></td></tr>`).join("")}</table>`;
+  <table><tr><th>ID</th><th>Projet</th><th>Cr\u00e9\u00e9 le</th><th>Statut</th><th></th></tr>
+  ${(d.audits||[]).map(a=>`<tr><td><a href="#/audits/${esc(a.id)}">${esc(a.id)}</a></td><td>${esc(a.project||"")}</td><td class="small">${esc(a.created_at||"")}</td><td>${pill(a.status||"")}</td><td><a href="#/audits/${esc(a.id)}">ouvrir</a></td></tr>`).join("")}</table>`;
 }
 async function createAudit(){
   const stype=st.value,isGh=stype==="github";
@@ -327,13 +366,14 @@ function filterFindings(d){
 }
 function findingRows(d){
   const fs=filterFindings(d);
-  if(!fs.length)return "<tr><td colspan=7 class='muted'>No finding matches these filters.</td></tr>";
+  if(!fs.length)return "<tr><td colspan=7 class='muted'>Aucun constat ne correspond \u00e0 ces filtres.</td></tr>";
   return fs.map(f=>`<tr>
     <td>${sevPill(f.severity)}<div class="small muted">${esc(f.confidence||"")}</div></td>
-    <td class="small" title="${esc(AXES[axisIdx(f)].tools)}">${axisShort(f)}<div class="small muted">${esc(axisLabel(f).replace(/&middot;/g,"·"))}</div></td>
+    <td class="small" title="${esc(AXES[axisIdx(f)].tools)}">${axisShort(f)}
+      <div class="small muted">${esc(axisLabelOf(f).replace(/&middot;/g,"\u00b7"))}</div></td>
     <td class="small"><code title="${esc(loc(f))}">${esc(loc(f))}</code></td>
     <td>${esc(f.title)}<div class="small muted">${esc((f.description||"").slice(0,180))}</div>
-        <div class="small muted">fix: ${esc((f.remediation||"").slice(0,160))}</div></td>
+        <div class="small muted">correction : ${esc((f.remediation||"").slice(0,160))}</div></td>
     <td class="small">${engines(f)}</td>
     <td class="small">${esc((f.requirement_ids||[]).join(", "))}</td>
     <td class="small">${esc((f.cwe||[]).join(", "))}${f.owasp?`<div class="muted">${esc(f.owasp)}</div>`:""}</td>
@@ -347,18 +387,18 @@ function renderFindingRows(d){
 }
 function findingsToolbar(){
   return `<div class="panel"><div class="row">
-    <div style="flex:0 0 170px"><label>Severity</label>
+    <div style="flex:0 0 180px"><label>S\u00e9v\u00e9rit\u00e9</label>
       <select onchange="setFilter('sev',this.value)">
-        <option value="">All severities</option>
-        ${SEV_ORDER.map(s=>`<option value="${s}" ${filter.sev===s?"selected":""}>${s}</option>`).join("")}
+        <option value="">Toutes les s\u00e9v\u00e9rit\u00e9s</option>
+        ${SEV_ORDER.map(s=>`<option value="${s}" ${filter.sev===s?"selected":""}>${sevFr(s)}</option>`).join("")}
       </select></div>
-    <div style="flex:0 0 190px"><label>Axis</label>
+    <div style="flex:0 0 230px"><label>Axe</label>
       <select onchange="setFilter('axis',this.value)">
-        <option value="">All axes</option>
+        <option value="">Tous les axes</option>
         ${AXES.map(a=>`<option value="${a.id}" ${filter.axis===a.id?"selected":""}>${a.id} &middot; ${a.tools}</option>`).join("")}
       </select></div>
-    <div><label>Search (title, file, endpoint, CWE, requirement)</label>
-      <input id="fq" placeholder="e.g. settings.py, CWE-89, REQ-004" value="${esc(filter.q)}"
+    <div><label>Recherche (titre, fichier, endpoint, CWE, exigence)</label>
+      <input id="fq" placeholder="ex. settings.py, CWE-89, REQ-004" value="${esc(filter.q)}"
              oninput="setFilter('q',this.value)"></div>
     <div style="flex:0 0 210px"><label>&nbsp;</label><span id="fcount" class="small muted"></span></div>
   </div></div>`;
@@ -369,55 +409,58 @@ async function pageAudit(id,tab,sev){
   tab=tab||"overview";
   if(sev!==undefined)filter.sev=sev||"";
   const tabs=["overview","requirements","findings","endpoints","jobs","logs","report"];
+  const TAB_FR={overview:"synth\u00e8se",requirements:"exigences",findings:"constats",
+                endpoints:"endpoints",jobs:"t\u00e2ches",logs:"journal",report:"rapport"};
   let body="";
   if(tab==="overview"){
     body=auditOverview(d,false);
   }else if(tab==="requirements"){
-    body=`<table><tr><th>Req</th><th style="width:110px">Status</th><th style="width:120px">Sources</th><th style="width:80px">Findings</th><th>Evidence / notes</th></tr>
-    ${(d.requirement_results||[]).map(r=>`<tr><td><b>${esc(r.requirement_id)}</b></td><td>${stPill(r.status)}</td><td class="small">${esc((r.sources||[]).join(", "))}</td><td class="small">${(r.finding_ids||[]).length}</td><td class="small muted">${esc((r.notes||[]).join(" | ").slice(0,220))}</td></tr>`).join("")}</table>`;
+    body=`<table><tr><th>Exigence</th><th style="width:110px">Axe</th><th style="width:130px">Statut</th><th style="width:120px">Sources</th><th style="width:90px">Constats</th><th>Preuves / notes</th></tr>
+    ${(d.requirement_results||[]).map(r=>`<tr><td><b>${esc(r.requirement_id)}</b></td><td class="small" title="${esc(AXES[axisIdx(r)].tools)}">${axisShort(r)}</td><td>${stPill(r.status)}<div class="small muted">${esc(r.status)}</div></td><td class="small">${esc((r.sources||[]).join(", "))}</td><td class="small">${(r.finding_ids||[]).length}</td><td class="small muted">${esc((r.notes||[]).join(" | ").slice(0,220))}</td></tr>`).join("")}</table>`;
   }else if(tab==="findings"){
     body=findingsToolbar()
-      +`<table><tr><th style="width:110px">Severity</th><th style="width:120px">Axis</th>
-        <th style="width:220px">Where (file:line / endpoint)</th><th>Finding / fix</th>
-        <th style="width:130px">Engines</th><th style="width:110px">Reqs</th><th style="width:110px">CWE / OWASP</th></tr>
+      +`<table><tr><th style="width:110px">S\u00e9v\u00e9rit\u00e9</th><th style="width:120px">Axe</th>
+        <th style="width:230px">Emplacement (fichier:ligne / endpoint)</th><th>Constat / correction</th>
+        <th style="width:130px">Moteurs</th><th style="width:110px">Exigences</th><th style="width:110px">CWE / OWASP</th></tr>
         <tbody id="frows">${findingRows(d)}</tbody></table>`;
     setTimeout(()=>renderFindingRows(d),0);
   }else if(tab==="endpoints"){
-    body=`<table><tr><th>Method</th><th>Path</th><th>View</th><th>Note</th></tr>
+    body=`<table><tr><th>M\u00e9thode</th><th>Chemin</th><th>Vue</th><th>Note</th></tr>
     ${(d.endpoints||[]).map(e=>`<tr><td>${esc(e.method)}</td><td><code>${esc(e.path)}</code></td><td class="small">${esc(e.view||"")}</td><td class="small muted">${esc(e.note||"")}</td></tr>`).join("")||"<tr><td colspan=4 class='muted'>No endpoints discovered</td></tr>"}</table>`;
   }else if(tab==="jobs"){
-    body=`<table><tr><th>Job</th><th>Status</th><th>Started</th><th>Finished</th><th>Error</th></tr>
+    body=`<table><tr><th>T\u00e2che</th><th>Statut</th><th>D\u00e9but</th><th>Fin</th><th>Erreur</th></tr>
     ${(d.jobs||[]).map(j=>`<tr><td>${esc(j.name)}</td><td>${pill(j.status)}</td><td class="small">${esc(j.started_at||"")}</td><td class="small">${esc(j.finished_at||"")}</td><td class="small muted">${esc(j.error||"")}</td></tr>`).join("")}</table>`;
   }else if(tab==="logs"){
     body=`<pre>${(d.logs||[]).map(l=>`[${esc((l.ts||"").slice(11,19))}] ${esc(l.level)} ${esc(l.message)}`).join("\n")}</pre>`;
   }else if(tab==="report"){
     body=`<div class="panel">
-      <button class="btn" onclick="downloadReport('${id}','pdf')">PDF &mdash; executive summary</button>
-      <button class="btn sec" onclick="downloadReport('${id}','pdf-full')">PDF &mdash; full detail</button>
-      <button class="btn sec" onclick="downloadReport('${id}','html')">HTML (full)</button>
+      <button class="btn" onclick="downloadReport('${id}','pdf')">PDF &mdash; synth\u00e8se (court)</button>
+      <button class="btn sec" onclick="downloadReport('${id}','pdf-full')">PDF &mdash; d\u00e9tail complet</button>
+      <button class="btn sec" onclick="downloadReport('${id}','html')">HTML (d\u00e9tail)</button>
       <button class="btn sec" onclick="downloadReport('${id}','json')">JSON</button>
-      <button class="btn sec" onclick="downloadReport('${id}','csv')">CSV (findings)</button>
+      <button class="btn sec" onclick="downloadReport('${id}','csv')">CSV (constats)</button>
       <p id="dlerr" class="sev-Critical"></p>
-      <p class="small muted"><b>Executive PDF</b>: summary, severity &amp; axis shares, priority findings with
-      locations, hotspot files, coverage and limitations (short). <b>Full PDF</b>: every finding with evidence,
-      exact code fixes, CWE/OWASP mapping. HTML/CSV/JSON: everything, for filtering and archival.</p></div>`;
+      <p class="small muted"><b>PDF synth\u00e8se</b> : r\u00e9sum\u00e9, parts par s\u00e9v\u00e9rit\u00e9 et par axe,
+      actions prioritaires avec emplacement, fichiers les plus touch\u00e9s, couverture et limites (court).
+      <b>PDF complet</b> : chaque constat avec preuve, correction exacte du code, correspondances CWE/OWASP.
+      HTML/CSV/JSON : tout, pour filtrer et archiver (CSV/JSON en anglais, cl\u00e9s stables).</p></div>`;
   }
   document.getElementById("app").innerHTML=`
   <h1>Audit ${esc(id)} ${pill(d.status)}</h1>
-  <p class="small muted">Project: <b>${esc((d.project||{}).name)}</b> &mdash; ${esc((d.project||{}).source_type)}
+  <p class="small muted">Projet : <b>${esc((d.project||{}).name)}</b> &mdash; ${esc((d.project||{}).source_type)}
   ${(d.project||{}).commit_sha?` &mdash; commit <code>${esc(d.project.commit_sha.slice(0,12))}</code>`:""}</p>
-  <div class="tabs">${tabs.map(t=>`<a class="${t===tab?"active":""}" href="#/audits/${id}/${t}">${t}</a>`).join("")}</div>
+  <div class="tabs">${tabs.map(t=>`<a class="${t===tab?"active":""}" href="#/audits/${id}/${t}">${TAB_FR[t]||t}</a>`).join("")}</div>
   ${body}
-  ${d.status!=="COMPLETE"?'<p class="muted small">Audit in progress &mdash; auto-refreshing&hellip;</p>':""}`;
+  ${d.status!=="COMPLETE"?'<p class="muted small">Audit en cours &mdash; rafra\u00eechissement automatique&hellip;</p>':""}`;
   if(d.status!=="COMPLETE")setTimeout(route,4000);
 }
 function pageSettings(){
-  document.getElementById("app").innerHTML=`<h1>Settings</h1>
+  document.getElementById("app").innerHTML=`<h1>Param\u00e8tres</h1>
   <div class="panel">
-    <p class="small muted">Configuration is loaded from <code>security-audit.yml</code> in the platform root.
-    Only targets listed under <code>network.authorized_targets</code> (default: 127.0.0.1 / localhost) may be network-scanned.
-    Network and DAST steps additionally require the explicit authorization confirmation.</p>
-    <label>API token</label><input value="${esc(TOKEN)}">
+    <p class="small muted">La configuration est lue depuis <code>security-audit.yml</code> \u00e0 la racine de la plateforme.
+    Seules les cibles list\u00e9es dans <code>network.authorized_targets</code> (par d\u00e9faut 127.0.0.1 / localhost) peuvent \u00eatre scann\u00e9es.
+    Les \u00e9tapes r\u00e9seau et DAST exigent en plus la confirmation d'autorisation.</p>
+    <label>Jeton d'API</label><input value="${esc(TOKEN)}">
   </div>`;
 }
 /* ------------------------------ router ------------------------------ */
@@ -435,7 +478,7 @@ async function route(){
 }
 window.addEventListener("hashchange",route);
 if(SNAP){document.querySelector("header").insertAdjacentHTML("afterend",
-  `<div class="banner" style="margin:14px 20px 0">Static snapshot export &mdash; read-only, no API. Buttons that need the server are disabled.</div>`);
+  `<div class="banner" style="margin:14px 20px 0">Export statique &mdash; lecture seule, sans API. Les boutons qui nécessitent le serveur sont désactivés.</div>`);
   document.querySelector("header button").style.display="none";}
 route();
 </script>

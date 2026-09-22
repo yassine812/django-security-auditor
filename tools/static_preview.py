@@ -27,7 +27,8 @@ def build_snapshot(workdir: str, audit_id: str) -> dict:
     for a in store.list_audits():
         audits.append({"id": a.get("id"), "project": a.get("project"),
                        "created_at": a.get("created_at"), "status": a.get("status")})
-    return {"audits": audits, "detail": audit.to_dict(), "projects": []}
+    from apps.audits.axes import enrich
+    return {"audits": audits, "detail": enrich(audit.to_dict()), "projects": []}
 
 
 def export(workdir: str, audit_id: str, out_path: Path) -> Path:
