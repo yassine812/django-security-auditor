@@ -54,6 +54,18 @@ class UserStore:
         self._write(data)
         self.audit_log("user.create", {"username": username, "role": role})
 
+    def set_password(self, username: str, password: str) -> None:
+        data = self._read()
+        user = data["users"].get(username)
+        if not user:
+            raise AuthError("unknown user")
+        salt = secrets.token_bytes(16)
+        digest = hashlib.scrypt(password.encode(), salt=salt, n=2 ** 14, r=8, p=1)
+        user["salt"] = salt.hex()
+        user["hash"] = digest.hex()
+        self._write(data)
+        self.audit_log("user.password_change", {"username": username})
+
     def verify(self, username: str, password: str) -> str:
         data = self._read()
         user = data["users"].get(username)

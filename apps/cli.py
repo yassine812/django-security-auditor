@@ -308,6 +308,20 @@ def cmd_serve(args):
     return 0
 
 
+def cmd_users(args):
+    from apps.users.auth import UserStore
+    import getpass
+    users = UserStore(args.workdir)
+    pw = args.password or getpass.getpass("new password: ")
+    if args.users_action == "add":
+        users.create_user(args.username, pw, args.role)
+        print(f"user '{args.username}' created with role {args.role}")
+    else:
+        users.set_password(args.username, pw)
+        print(f"password updated for '{args.username}'")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="security-audit",
                                 description="Automated Django Security Audit Platform")
@@ -393,6 +407,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--host", default="127.0.0.1")
     sp.add_argument("--port", type=int, default=8300)
     sp.set_defaults(func=cmd_serve)
+
+    sp = sub.add_parser("users", help="manage dashboard users (add / password)")
+    usp = sp.add_subparsers(dest="users_action", required=True)
+    ua = usp.add_parser("add", help="create a user")
+    ua.add_argument("username")
+    ua.add_argument("--role", default="analyst", choices=["admin", "analyst", "viewer"])
+    ua.add_argument("--password", default=None, help="prompted securely if omitted")
+    ua.set_defaults(func=cmd_users)
+    up = usp.add_parser("password", help="change a user's password")
+    up.add_argument("username")
+    up.add_argument("--password", default=None, help="prompted securely if omitted")
+    up.set_defaults(func=cmd_users)
     return p
 
 
