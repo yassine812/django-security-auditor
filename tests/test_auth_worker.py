@@ -83,3 +83,13 @@ def test_job_queue_lists_jobs():
     q = JobQueue()
     q.submit("a", lambda: None)
     assert q.list()[0]["kind"] == "a"
+
+def test_token_survives_restart(tmp_path):
+    from apps.users.auth import UserStore
+    a = UserStore(str(tmp_path))
+    a.create_user("bob", "pw12345678", "analyst")
+    tok = a.verify("bob", "pw12345678")
+    # simulate a server restart: brand-new store instance reading same file
+    b = UserStore(str(tmp_path))
+    user, role = b.require(tok, "read")
+    assert user == "bob" and role == "analyst"

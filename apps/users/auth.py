@@ -1,8 +1,10 @@
 """Platform authentication/RBAC + audit logging (spec 34, 38).
 
 Users are stored in <workdir>/users.json with scrypt-hashed passwords and
-role-based access (admin / analyst / viewer).  Tokens are random 32-byte
-hex strings mapped to a user.  All mutating API calls are audit-logged.
+role-based access (admin / analyst / viewer).  Session tokens are random
+32-byte hex strings stored *hashed* (SHA-256) in users.json with a 12 h
+expiry, so logins survive server restarts.  All mutating API calls are
+audit-logged.
 """
 from __future__ import annotations
 
@@ -10,6 +12,7 @@ import hashlib
 import json
 import os
 import secrets
+import time
 from pathlib import Path
 
 ROLES = ("admin", "analyst", "viewer")
@@ -18,6 +21,7 @@ ROLE_PERMISSIONS = {
     "analyst": {"read", "create_audit", "retest"},
     "viewer": {"read"},
 }
+TOKEN_TTL = 12 * 3600          # 12 hours
 
 
 class AuthError(Exception):
@@ -29,7 +33,6 @@ class UserStore:
         self.path = Path(workdir) / "users.json"
         self.log_path = Path(workdir) / "audit.log"
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._tokens: dict[str, str] = {}          # token -> username
         if not self.path.exists():
             self._write({"users": {}})
 
@@ -75,24 +78,35 @@ class UserStore:
                                 n=2 ** 14, r=8, p=1)
         if not secrets.compare_digest(digest.hex(), user["hash"]):
             raise AuthError("invalid credentials")
-        token = secrets.token_hex(32)
-        self._tokens[token] = username
-        return token
+        return self._issue_token(data, username)
 
     def create_token(self, username: str) -> str:
         data = self._read()
         if username not in data["users"]:
             raise AuthError("unknown user")
+        return self._issue_token(data, username)
+
+    def _issue_token(self, data: dict, username: str) -> str:
+        """Persist a hashed session token (survives restarts, expires in 12h)."""
         token = secrets.token_hex(32)
-        self._tokens[token] = username
+        sha = hashlib.sha256(token.encode()).hexdigest()
+        now = time.time()
+        tokens = [t for t in data.get("tokens", []) if t.get("expires", 0) > now]
+        tokens.append({"sha": sha, "user": username, "expires": now + TOKEN_TTL})
+        data["tokens"] = tokens
+        self._write(data)
         return token
 
     def user_for_token(self, token: str) -> tuple[str, str]:
-        username = self._tokens.get(token)
-        if not username:
-            raise AuthError("invalid or expired token")
-        role = self._read()["users"].get(username, {}).get("role", "viewer")
-        return username, role
+        sha = hashlib.sha256(token.encode()).hexdigest()
+        data = self._read()
+        now = time.time()
+        for t in data.get("tokens", []):
+            if secrets.compare_digest(t.get("sha", ""), sha) and t.get("expires", 0) > now:
+                username = t["user"]
+                role = data["users"].get(username, {}).get("role", "viewer")
+                return username, role
+        raise AuthError("invalid or expired token")
 
     def require(self, token: str | None, permission: str) -> tuple[str, str]:
         if not token:
