@@ -222,3 +222,15 @@ def test_csv_has_axis_column(tmp_path):
     paths = write_csv(sample_audit(), tmp_path)
     rows = list(csv.DictReader(open(paths[0])))
     assert rows[0]["axis"] in ("A1", "A2", "A3", "A4")
+
+
+def test_dashboard_has_axis_tab_and_french_labels():
+    """L'interface doit être en français et avoir un onglet dédié « 4 axes »."""
+    from pathlib import Path as _P
+    html = (_P(__file__).resolve().parents[1] / "frontend" / "dashboard.html").read_text()
+    assert 'axes:"4 axes"' in html
+    assert "Résultats par axe" in html
+    assert "Exigences transverses" in html
+    assert "Constats par sévérité" in html
+    assert "Se déconnecter" in html
+    assert "Download failed" in html or "downloadReport" in html
