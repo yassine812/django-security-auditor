@@ -101,3 +101,12 @@ def test_findings_map_to_requirements():
                ["REQ-107"], "127.0.0.1", 5432, "PostgreSQL", "16.1")
     assert res.findings[0].requirement_ids == ["REQ-107"]
     assert res.findings[0].severity == "High"
+
+
+def test_findings_record_host_port_location():
+    from scanners.base import ScanResult
+    from scanners.network.scanner import NetworkScanner
+    res = ScanResult(scanner="network")
+    NetworkScanner()._finding(res, "PORT-DB-001", "High", "PostgreSQL exposed", "db exposed",
+                              ["REQ-107"], "127.0.0.1", 5432, "PostgreSQL", "16.1")
+    assert res.findings[0].endpoint == "127.0.0.1:5432"

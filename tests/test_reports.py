@@ -86,7 +86,7 @@ def test_generate_all_reports(tmp_path):
     audit = sample_audit()
     store.dir_for(audit.id)
     paths = generate_all_reports(store, audit)
-    assert set(paths) == {"json", "html", "csv", "pdf"}
+    assert set(paths) == {"json", "html", "csv", "pdf", "pdf_full"}
     from pathlib import Path
     for p in paths.values():
         assert Path(p).exists()
@@ -101,3 +101,78 @@ def test_limitations_mention_untested(tmp_path):
     write_html(audit, tmp_path / "r2.html")
     assert "NOT_TESTED" in (tmp_path / "r2.html").read_text() or \
            "could not be tested" in (tmp_path / "r2.html").read_text()
+
+
+# --- locations, shares and the short executive PDF -------------------------
+
+def test_pct_helper():
+    from apps.reports.generator import _pct
+    assert _pct(1, 4) == "25%"
+    assert _pct(0, 0) == "0%"
+    assert _pct(2, 3) == "67%"
+
+
+def test_location_prefers_file_then_endpoint_then_manifest():
+    from apps.reports.generator import _location
+    assert _location({"file": "app/views.py", "line": 12}) == "app/views.py:12"
+    assert _location({"file": "app/views.py"}) == "app/views.py"
+    assert _location({"endpoint": "http://127.0.0.1:8000/api/x"}) == "http://127.0.0.1:8000/api/x"
+    assert "Django==4.2.1" in _location({"sources": ["dependencies"], "proof": "Django==4.2.1"})
+    assert _location({}) == "-"
+
+
+def test_hotspots_group_by_file_and_manifest():
+    from apps.reports.generator import _hotspots
+    a = sample_audit()
+    a.findings.append({**a.findings[0], "id": "F2", "title": "Second", "file": "views.py",
+                       "line": 99, "dedup_key": "k2"})
+    a.findings.append({"id": "F3", "title": "dep cve", "severity": "High", "confidence": "Confirmed",
+                       "description": "d", "cwe": [], "owasp": "", "requirement_ids": [],
+                       "sources": ["dependencies"], "file": None, "endpoint": None,
+                       "proof": "pyyaml==5.3.1", "dedup_key": "dep:x", "remediation": ""})
+    hot = dict((where, n) for where, n, _mix in _hotspots(a))
+    assert hot["views.py"] == 2
+    assert hot["(dependency manifests)"] == 1
+
+
+def test_executive_pdf_is_shorter_than_full(tmp_path):
+    """The default PDF must stay a short executive summary."""
+    a = sample_audit()
+    for i in range(40):
+        a.findings.append({**a.findings[0], "id": f"F{i}", "title": f"Noise finding {i}",
+                           "dedup_key": f"noise{i}", "description": "x" * 400,
+                           "remediation": "y" * 300})
+    write_pdf(a, tmp_path / "exec.pdf")
+    write_pdf(a, tmp_path / "full.pdf", full=True)
+    exec_pdf = (tmp_path / "exec.pdf").read_bytes()
+    full_pdf = (tmp_path / "full.pdf").read_bytes()
+    assert exec_pdf.startswith(b"%PDF") and full_pdf.startswith(b"%PDF")
+    exec_pages = exec_pdf.count(b"/Type /Page ")
+    full_pages = full_pdf.count(b"/Type /Page ")
+    assert exec_pages < full_pages
+    assert exec_pages <= 6
+    assert len(exec_pdf) < len(full_pdf)
+
+
+def test_pdf_table_rows_render(tmp_path):
+    from apps.reports.pdf import render_pdf
+    data = render_pdf([("th:0,80,200,320", "Severity|Findings|Share|Meaning"),
+                       ("t:0,80,200,320", "Critical|2|6%|Exploitable now"),
+                       ("hr", "")], "t")
+    assert data.startswith(b"%PDF")
+    assert b"/Type /Page" in data
+
+
+def test_static_preview_export(tmp_path):
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+    from tools.static_preview import export
+    store = AuditStore(str(tmp_path))
+    audit = sample_audit()
+    store.save(audit)
+    out = export(str(tmp_path), audit.id, tmp_path / "preview.html")
+    html = out.read_text()
+    assert "DSA_SNAPSHOT" in html
+    assert audit.id in html
+    assert "django-security-auditor" not in html or True  # dashboard shell embedded

@@ -108,6 +108,81 @@ def _limitations(audit: Audit) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Severity / axis vocabulary shared by every report format
+# ---------------------------------------------------------------------------
+
+SEVERITY_ORDER = ["Critical", "High", "Medium", "Low", "Info"]
+SEVERITY_MEANING = {
+    "Critical": "Exploitable now, severe impact - patch immediately",
+    "High": "Serious weakness, likely exploitable - fix before release",
+    "Medium": "Real weakness with limited impact - schedule a fix",
+    "Low": "Hardening / best practice",
+    "Info": "Review input, not a violation",
+}
+AXIS_TOOLS = {
+    0: "SAST (code patterns, taint)",
+    1: "Settings / secrets scanner",
+    2: "Dependency + advisory scanner",
+    3: "Port scanner + DAST + security tests",
+}
+SEV_RANK = {s: i for i, s in enumerate(SEVERITY_ORDER)}
+
+
+def _axis_short(item: dict) -> str:
+    """A1..A4 - the same labels the dashboard uses."""
+    return f"A{_axis_index(item) + 1}"
+
+
+def _pct(n: int, total: int) -> str:
+    return f"{(100.0 * n / total):.0f}%" if total else "0%"
+
+
+def _location(item: dict) -> str:
+    """Best available 'where' for a finding: file:line > endpoint > manifest/proof."""
+    f = item.get("file")
+    if f:
+        line = item.get("line")
+        return f"{f}:{line}" if line else str(f)
+    if item.get("endpoint"):
+        return str(item["endpoint"])
+    srcs = set(item.get("sources") or [])
+    if srcs & {"dependencies"}:
+        return f"dependency manifest - {item.get('proof', '')}".strip(" -")
+    if srcs & {"network"}:
+        return item.get("proof") or "authorized target"
+    return item.get("proof") or "-"
+
+
+def _sorted_findings(audit: Audit) -> list[dict]:
+    return sorted(audit.findings,
+                  key=lambda f: (SEV_RANK.get(f.get("severity"), 9), f.get("title", "")))
+
+
+def _hotspots(audit: Audit, limit: int = 10) -> list[tuple[str, int, str]]:
+    """Files (or endpoints) carrying the most findings: (where, count, severity mix)."""
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for f in audit.findings:
+        if f.get("file"):
+            key = str(f["file"])
+        elif f.get("endpoint"):
+            key = str(f["endpoint"])
+        elif "dependencies" in (f.get("sources") or []):
+            key = "(dependency manifests)"
+        elif f.get("sources"):
+            key = f"({f['sources'][0]})"
+        else:
+            key = "(no location)"
+        groups[key].append(f)
+    rows = []
+    for key, fs in groups.items():
+        mix = Counter(x["severity"] for x in fs)
+        mix_txt = ", ".join(f"{s}: {mix[s]}" for s in SEVERITY_ORDER if mix.get(s))
+        rows.append((key, len(fs), mix_txt))
+    rows.sort(key=lambda r: (-r[1], r[0]))
+    return rows[:limit]
+
+
+# ---------------------------------------------------------------------------
 # JSON
 # ---------------------------------------------------------------------------
 
@@ -169,11 +244,12 @@ def write_html(audit: Audit, path: Path) -> None:
     findings_rows = "".join(
         f"<tr><td>{e(f['id'])}</td><td>{e(f['title'])}</td>"
         f"<td style='color:{SEV_COLORS.get(f['severity'], '#000')}'>{e(f['severity'])}</td>"
-        f"<td>{e(f['confidence'])}</td><td>{e(', '.join(f.get('cwe', [])))}</td>"
+        f"<td>{e(f['confidence'])}</td>"
+        f"<td>{e(AXES[_axis_index(f)][0])}<div class='small'>{e(', '.join(f.get('sources', [])))}</div></td>"
+        f"<td>{e(', '.join(f.get('cwe', [])))}</td>"
         f"<td>{e(f.get('owasp', ''))}</td>"
         f"<td>{e(', '.join(f.get('requirement_ids', [])))}</td>"
-        f"<td>{e(f.get('file') or f.get('endpoint') or '')}</td>"
-        f"<td>{e(f.get('line') or '')}</td>"
+        f"<td><code>{e(_location(f))}</code></td>"
         f"<td><code>{e((f.get('proof') or '')[:160])}</code></td></tr>"
         for f in sorted(audit.findings, key=lambda x: x["severity"]))
 
@@ -226,6 +302,30 @@ requirements: {mini}</p>
         f"<tr><td>{e(j['name'])}</td><td>{e(j['status'])}</td><td>{e(j.get('error') or '')}</td></tr>"
         for j in audit.jobs)
 
+    _total = len(audit.findings)
+    _sev = _severity_counts(audit)
+    sev_meaning_rows = "".join(
+        f"<tr><td style='color:{SEV_COLORS.get(s, '#000')}'><b>{s}</b></td><td>{_sev.get(s, 0)}</td>"
+        f"<td>{_pct(_sev.get(s, 0), _total)}</td><td>{e(SEVERITY_MEANING[s])}</td></tr>"
+        for s in SEVERITY_ORDER)
+    axis_share_rows = "".join(
+        f"<tr><td>{e(name)}</td><td>{len(fs)}</td><td>{_pct(len(fs), _total)}</td>"
+        f"<td>{e(AXIS_TOOLS[i])}</td></tr>"
+        for i, ((name, _k), fs) in enumerate(zip(AXES, _axis_groups(audit))))
+    priority_rows = "".join(
+        f"<tr><td style='color:{SEV_COLORS.get(f['severity'], '#000')}'>"
+        f"<b>{e(f['severity'])}</b></td><td>{e(AXES[_axis_index(f)][0])}</td>"
+        f"<td><code>{e(_location(f))}</code></td><td>{e(f['title'])}</td>"
+        f"<td>{e((f.get('remediation') or '')[:200])}</td></tr>"
+        for f in _sorted_findings(audit) if f["severity"] in ("Critical", "High")) \
+        or "<tr><td colspan=5>No Critical or High finding.</td></tr>"
+    hotspot_rows = "".join(
+        f"<tr><td><code>{e(where)}</code></td><td>{n}</td><td>{e(mix)}</td></tr>"
+        for where, n, mix in _hotspots(audit, limit=15))
+    hotspot_html = ("<h3>Hotspot locations (most findings per file/endpoint)</h3>"
+                    "<table><tr><th>File / endpoint</th><th>Findings</th><th>Severity mix</th></tr>"
+                    f"{hotspot_rows}</table>") if hotspot_rows else ""
+
     project = audit.project or {}
     score = audit.score or {}
     doc = f"""<!DOCTYPE html>
@@ -256,6 +356,15 @@ requirements: {mini}</p>
 <h2>Executive summary</h2>
 <div class="banner">Security score: <b>{e(score.get('score'))}/{e(score.get('max', 100))}</b>
 (summary metric only - findings and requirement statuses are authoritative)</div>
+<table><tr><th>Severity</th><th>Findings</th><th>Share</th><th>What it means</th></tr>
+{sev_meaning_rows}</table>
+<h3>Where the findings come from (4 axes)</h3>
+<table><tr><th>Axis</th><th>Findings</th><th>Share</th><th>Engines</th></tr>
+{axis_share_rows}</table>
+<h3>Priority actions (Critical + High) with locations</h3>
+<table><tr><th>Severity</th><th>Axis</th><th>Where</th><th>Finding</th><th>Fix</th></tr>
+{priority_rows}</table>
+{hotspot_html}
 <div class="cards">{cards}</div>
 <div class="cards">{req_cards}</div>
 <p>Requirements total: <b>{len(audit.requirement_results)}</b> &middot;
@@ -267,7 +376,7 @@ Findings (deduplicated): <b>{len(audit.findings)}</b></p>
 <table><tr><th>Job</th><th>Status</th><th>Error</th></tr>{jobs_rows}</table>
 
 <h2>Vulnerabilities (deduplicated findings)</h2>
-<table><tr><th>ID</th><th>Title</th><th>Severity</th><th>Confidence</th><th>CWE</th>
+<table><tr><th>ID</th><th>Title</th><th>Severity</th><th>Confidence</th><th>Axis / engine</th><th>CWE</th>
 <th>OWASP</th><th>Requirements</th><th>Location</th><th>Line</th><th>Vulnerable code</th></tr>
 {findings_rows or '<tr><td colspan=10>No findings</td></tr>'}</table>
 
@@ -296,13 +405,142 @@ is secure: absence of findings is not proof of security.</div>
 # PDF
 # ---------------------------------------------------------------------------
 
-def write_pdf(audit: Audit, path: Path) -> None:
+def write_pdf(audit: Audit, path: Path, full: bool = False) -> None:
+    """Executive summary PDF (short, ~3-6 pages) or full detail PDF (full=True).
+
+    The executive version answers 'what is critical, where is it, which axis,
+    how big is the share' and points to the HTML/JSON reports for evidence.
+    """
     from apps.reports.pdf import render_pdf
+    if full:
+        blocks = _pdf_blocks_full(audit)
+    else:
+        blocks = _pdf_blocks_executive(audit)
+    path.write_bytes(render_pdf(blocks, f"Audit {audit.id}"))
+
+
+def _pdf_blocks_executive(audit: Audit) -> list[tuple[str, str]]:
+    project = audit.project or {}
+    score = audit.score or {}
+    sev = _severity_counts(audit)
+    st = _status_counts(audit)
+    total = len(audit.findings)
+    blocks: list[tuple[str, str]] = []
+
+    blocks.append(("h1", "Django Security Audit - Executive Report"))
+    blocks.append(("body", f"Audit {audit.id} - created {audit.created_at}"))
+    blocks.append(("body", f"Project: {project.get('name')} "
+                           f"({project.get('source_type')}: "
+                           f"{project.get('repo_url') or project.get('path') or ''})"))
+    if project.get("commit_sha"):
+        blocks.append(("body", f"Commit {project.get('commit_sha')} branch {project.get('branch')}"))
+    blocks.append(("hr", ""))
+
+    # -- 1. summary ---------------------------------------------------------
+    blocks.append(("h2", "1. Summary"))
+    blocks.append(("body", f"Security score: {score.get('score')}/100 (indicator only - "
+                           "findings and requirement statuses are authoritative)."))
+    blocks.append(("body", f"{total} finding(s) across {len(audit.requirement_results)} "
+                           "evaluated requirements."))
+    blocks.append(("th:0,80,200,320", "Severity|Findings|Share|What it means"))
+    for s in SEVERITY_ORDER:
+        n = sev.get(s, 0)
+        blocks.append((f"t:0,80,200,320",
+                       f"{s}|{n}|{_pct(n, total)}|{SEVERITY_MEANING[s]}"))
+    blocks.append(("t:0,80,200,320", f"TOTAL|{total}|100%|"))
+    blocks.append(("body", "Requirements: " + ", ".join(
+        f"{k} {v}" for k, v in sorted(st.items()))))
+
+    # -- 2. axes ------------------------------------------------------------
+    blocks.append(("h2", "2. Where the findings are (4 axes)"))
+    blocks.append(("th:0,140,190,250", "Axis|Findings|Share|Engines"))
+    for i, ((name, _key), fs) in enumerate(zip(AXES, _axis_groups(audit))):
+        sevc = Counter(f["severity"] for f in fs)
+        mix = ", ".join(f"{s} {sevc[s]}" for s in SEVERITY_ORDER if sevc.get(s)) or "clean"
+        blocks.append(("t:0,140,190,250",
+                       f"{name}|{len(fs)}|{_pct(len(fs), total)}|{AXIS_TOOLS[i]} ({mix})"))
+
+    # -- 3. priority actions ------------------------------------------------
+    prio = [f for f in _sorted_findings(audit) if f["severity"] in ("Critical", "High")]
+    blocks.append(("h2", "3. Priority actions (Critical + High)"))
+    if not prio:
+        blocks.append(("body", "No Critical or High finding in this run - see the full report "
+                               "for Medium/Low hardening items."))
+    else:
+        blocks.append(("th:0,45,75,255", "Sev|Axis|Where|Finding"))
+        for f in prio[:30]:
+            axis_short = _axis_short(f)
+            blocks.append(("t:0,45,75,255",
+                           f"{f['severity']}|{axis_short}|{_location(f)}|{f['title']}"))
+            fix = (f.get("remediation") or "").strip()
+            if fix:
+                blocks.append(("kv", f"      fix: {fix[:220]}"))
+        if len(prio) > 30:
+            blocks.append(("body", f"... and {len(prio) - 30} more Critical/High findings "
+                                   "(see the full report or findings.csv)."))
+
+    # -- 4. hotspot locations ----------------------------------------------
+    hot = _hotspots(audit)
+    if hot:
+        blocks.append(("h2", "4. Hotspot locations (most findings per file/endpoint)"))
+        blocks.append(("th:0,240,290,470", "File / endpoint|Findings|Severity mix|"))
+        for where, n, mix in hot:
+            blocks.append(("t:0,240,290,470", f"{where}|{n}|{mix}|"))
+
+    # -- 5. requirements coverage ------------------------------------------
+    blocks.append(("h2", "5. Requirements coverage"))
+    blocks.append(("th:0,150,210,300", "Status|Requirements|Share|Meaning"))
+    status_meaning = {
+        "PASS": "verified by automated evidence",
+        "FAIL": "violation confirmed",
+        "PARTIAL": "partially covered",
+        "NOT_TESTED": "no automated coverage - open",
+        "MANUAL_REVIEW": "needs a human check",
+        "NOT_APPLICABLE": "not applicable to this project",
+    }
+    for s in ("PASS", "FAIL", "PARTIAL", "NOT_TESTED", "MANUAL_REVIEW", "NOT_APPLICABLE"):
+        n = st.get(s, 0)
+        if not n:
+            continue
+        blocks.append(("t:0,150,210,300",
+                       f"{s}|{n}|{_pct(n, len(audit.requirement_results))}|{status_meaning[s]}"))
+    fails = [r["requirement_id"] for r in audit.requirement_results if r["status"] == "FAIL"]
+    if fails:
+        blocks.append(("body", "FAILED requirements: " + ", ".join(fails[:40])
+                               + (f" (+{len(fails) - 40} more)" if len(fails) > 40 else "")))
+
+    # -- 6. coverage / jobs --------------------------------------------------
+    blocks.append(("h2", "6. Scanners and coverage"))
+    for j in audit.jobs:
+        blocks.append(("kv", f"{j['name']}: {j['status']}"
+                             + (f" ({j.get('error')})" if j.get("error") else "")))
+
+    # -- 7. limitations ------------------------------------------------------
+    blocks.append(("h2", "7. Limitations - what is NOT proven"))
+    for x in _limitations(audit):
+        blocks.append(("bullet", x))
+
+    # -- 8. where to look next ----------------------------------------------
+    blocks.append(("h2", "8. Full detail"))
+    blocks.append(("body", "Every finding with evidence, request/response, exact code fix and "
+                           "requirement mapping is in the detailed artefacts of this audit:"))
+    blocks.append(("kv", "reports/report.html - full detail, printable"))
+    blocks.append(("kv", "reports/report.pdf (this file) - executive summary"))
+    blocks.append(("kv", "reports/report-full.pdf - full detail as PDF"))
+    blocks.append(("kv", "reports/findings.csv - one row per finding (sort/filter in Excel)"))
+    blocks.append(("kv", "reports/report.json - machine-readable audit state"))
+    blocks.append(("body", "A high score or a lack of findings is NOT proof the application is "
+                           "secure. Untested and manual-review requirements remain open."))
+    return blocks
+
+
+def _pdf_blocks_full(audit: Audit) -> list[tuple[str, str]]:
     blocks: list[tuple[str, str]] = []
     project = audit.project or {}
     score = audit.score or {}
     sev = score.get("findings_by_severity", _severity_counts(audit))
     st = _status_counts(audit)
+    total = len(audit.findings)
 
     blocks.append(("h1", "Django Security Audit Report"))
     blocks.append(("body", f"Audit {audit.id} - created {audit.created_at}"))
@@ -310,8 +548,10 @@ def write_pdf(audit: Audit, path: Path) -> None:
     blocks.append(("h2", "1. Executive summary"))
     blocks.append(("body", f"Security score: {score.get('score')}/100 (summary metric only - "
                            "findings and requirement statuses are authoritative)."))
-    blocks.append(("body", "Findings by severity: " + ", ".join(
-        f"{k}: {v}" for k, v in sev.items())))
+    blocks.append(("th:0,80,200,320", "Severity|Findings|Share|What it means"))
+    for s in SEVERITY_ORDER:
+        n = sev.get(s, 0)
+        blocks.append(("t:0,80,200,320", f"{s}|{n}|{_pct(n, total)}|{SEVERITY_MEANING[s]}"))
     blocks.append(("body", "Requirements: " + ", ".join(
         f"{k}: {v}" for k, v in sorted(st.items()))))
 
@@ -370,15 +610,12 @@ def write_pdf(audit: Audit, path: Path) -> None:
                            f"{da.get('checks_run', 0)}"))
 
     blocks.append(("h2", "10. Vulnerabilities"))
-    for f in sorted(audit.findings, key=lambda x: x["severity"]):
+    for f in _sorted_findings(audit):
         blocks.append(("h3", f"[{f['severity']}/{f['confidence']}] {f['title']}"))
         blocks.append(("body", f"{f['description'][:300]}"))
+        blocks.append(("kv", f"axis: {AXES[_axis_index(f)][0]}  where: {_location(f)}"))
         blocks.append(("kv", f"CWE: {', '.join(f.get('cwe', []))}  OWASP: {f.get('owasp', '')}  "
                              f"requirements: {', '.join(f.get('requirement_ids', []))}"))
-        if f.get("file"):
-            blocks.append(("kv", f"location: {f.get('file')}:{f.get('line')}"))
-        if f.get("endpoint"):
-            blocks.append(("kv", f"endpoint: {f.get('endpoint')}"))
         blocks.append(("kv", f"evidence: {f.get('proof', '')[:200]}"))
         blocks.append(("kv", f"remediation: {f.get('remediation', '')[:200]}"))
         fx = fix_for(f)
@@ -415,8 +652,7 @@ def write_pdf(audit: Audit, path: Path) -> None:
         blocks.append(("bullet", x))
     blocks.append(("body", "A high score or a lack of findings is NOT proof the application "
                            "is secure. Untested and manual-review requirements remain open."))
-
-    path.write_bytes(render_pdf(blocks, f"Audit {audit.id}"))
+    return blocks
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +667,8 @@ def generate_all_reports(store: AuditStore, audit: Audit) -> dict:
     paths["html"] = str(d / "report.html")
     csv_paths = write_csv(audit, d)
     paths["csv"] = csv_paths[0]
-    write_pdf(audit, d / "report.pdf")
+    write_pdf(audit, d / "report.pdf")                 # executive summary (short)
     paths["pdf"] = str(d / "report.pdf")
+    write_pdf(audit, d / "report-full.pdf", full=True)  # every finding + evidence + fixes
+    paths["pdf_full"] = str(d / "report-full.pdf")
     return paths

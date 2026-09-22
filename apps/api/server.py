@@ -183,9 +183,11 @@ def build_app(store: AuditStore, config_path: str | None = None,
         store.dir_for(audit_id)
         base = store.root / audit_id / "reports"
         names = {"html": "report.html", "json": "report.json", "pdf": "report.pdf",
+                 "pdf-full": "report-full.pdf", "pdf_full": "report-full.pdf",
                  "csv": "findings.csv"}
         if fmt not in names:
-            raise HTTPException(status_code=400, detail="format must be html|json|pdf|csv")
+            raise HTTPException(status_code=400,
+                                detail="format must be html|json|pdf|pdf-full|csv")
         f = base / names[fmt]
         if not f.exists():
             raise HTTPException(status_code=404, detail="report not generated yet")

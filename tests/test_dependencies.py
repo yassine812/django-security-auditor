@@ -102,3 +102,16 @@ def test_advisory_reference_in_evidence(vulnerable_app):
     advs = [e.location.get("advisory") for e in r.evidence
             if e.rule_id == "DEP-CVE-001" and e.polarity == "vuln"]
     assert any(a and a.startswith("CVE-") for a in advs)
+
+
+def test_findings_record_their_manifest(vulnerable_app):
+    """Every dependency finding must say which file declared the package."""
+    from scanners.base import AuditContext
+    from scanners.dependencies.scanner import DependencyScanner
+    ctx = AuditContext(source_dir=str(vulnerable_app))
+    ctx.profile = discover_project(str(vulnerable_app))
+    r = DependencyScanner().safe_run(ctx)
+    assert r.findings, "expected dependency findings in the fixture"
+    for f in r.findings:
+        assert f.file, f"{f.title} has no manifest location"
+        assert f.file.endswith(".txt") or f.file.endswith(".toml") or f.file.endswith(".lock")

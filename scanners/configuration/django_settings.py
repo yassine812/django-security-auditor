@@ -54,11 +54,14 @@ class SettingsState:
     def __init__(self):
         self.values: dict = {}        # name -> value (UNKNOWN allowed)
         self.origin: dict = {}        # name -> file
+        self.lines: dict = {}         # name -> line number in that file
         self.files: list = []
 
-    def set(self, name, value, origin):
+    def set(self, name, value, origin, line: int | None = None):
         self.values[name] = value
         self.origin[name] = origin
+        if line is not None:
+            self.lines[name] = line
 
     def get(self, name, default=UNKNOWN):
         return self.values.get(name, default)
@@ -179,9 +182,9 @@ def extract_settings(source_dir: str, settings_files: list[str] | None = None) -
             if isinstance(node, ast.Assign):
                 for t in node.targets:
                     if isinstance(t, ast.Name) and t.id.isupper():
-                        state.set(t.id, _eval_node(node.value), rel)
+                        state.set(t.id, _eval_node(node.value), rel, node.lineno)
             elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-                state.set(node.target.id, _eval_node(node.value), rel)
+                state.set(node.target.id, _eval_node(node.value), rel, node.lineno)
     return state
 
 
@@ -209,7 +212,8 @@ class DjangoSettingsScanner(BaseScanner):
                 summary=out.summary,
                 location={"setting": out.setting, "current": out.current,
                           "expected": out.expected,
-                          "file": state.origin.get(out.setting, "")},
+                          "file": state.origin.get(out.setting, ""),
+                          "line": state.lines.get(out.setting)},
                 requirement_ids=out.requirement_ids,
                 # settings facts are statically certain
                 confidence="Confirmed" if out.polarity == "vuln" else "High",
@@ -226,6 +230,7 @@ class DjangoSettingsScanner(BaseScanner):
                     sources=["configuration"],
                     evidence_ids=[result.evidence[-1].id],
                     file=state.origin.get(out.setting) or None,
+                    line=state.lines.get(out.setting),
                     proof=f"{out.setting} = {out.current} (expected: {out.expected})",
                     remediation=f"Set {out.setting} to {out.expected}.",
                     dedup_key=f"config:{out.check_id}:{out.setting}",

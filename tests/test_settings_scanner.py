@@ -115,3 +115,13 @@ def test_drf_allowany_default_flagged(tmp_path):
     r = DjangoSettingsScanner().safe_run(ctx)
     ids = {(e.rule_id, e.polarity) for e in r.evidence}
     assert ("CFG-DRF-PERM", "vuln") in ids
+
+
+def test_findings_record_file_and_line(vulnerable_app):
+    """Settings findings must point at the exact file and line."""
+    r = run(vulnerable_app)
+    debug = [f for f in r.findings if f.dedup_key.endswith(":DEBUG")]
+    assert debug, "DEBUG finding expected"
+    f = debug[0]
+    assert f.file and f.file.endswith("settings.py")
+    assert isinstance(f.line, int) and f.line > 0

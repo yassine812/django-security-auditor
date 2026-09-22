@@ -291,6 +291,7 @@ class NetworkScanner(BaseScanner):
             severity=severity_override or severity, confidence="Confirmed",
             category="Network Exposure", cwe=["CWE-668"], owasp="A05:2021",
             requirement_ids=list(reqs), sources=["network"], evidence_ids=[evidence.id],
+            endpoint=f"{host}:{port}",
             proof=f"{host}:{port} open ({service} {version})".strip(),
             remediation="Bind the service to a private interface / firewall it, or close the port.",
             dedup_key=f"net:{rule_id}:{host}:{port}")

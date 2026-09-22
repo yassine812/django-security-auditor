@@ -143,31 +143,44 @@ class DependencyScanner(BaseScanner):
         # are searched recursively so projects nested in subfolders are covered.
         deps: list[dict] = []
         sources: list[str] = []
+
+        def _tag(items: list, manifest: str) -> list:
+            """Record which manifest declared each dependency (report locations)."""
+            for it in items:
+                it.setdefault("manifest", manifest)
+            return items
+
         for dirpath in _walk(root):
             rel = dirpath.relative_to(root).as_posix()
             for req_file in sorted(dirpath.glob("requirements*.txt")):
                 if req_file.is_file():
-                    deps.extend(parse_requirements_txt(_read(req_file), req_file.parent))
-                    sources.append(req_file.relative_to(root).as_posix())
+                    rel_req = req_file.relative_to(root).as_posix()
+                    deps.extend(_tag(parse_requirements_txt(_read(req_file), req_file.parent),
+                                     rel_req))
+                    sources.append(rel_req)
             if (dirpath / "pyproject.toml").is_file():
-                deps.extend(_deps_from_pyproject(_read(dirpath / "pyproject.toml")))
+                deps.extend(_tag(_deps_from_pyproject(_read(dirpath / "pyproject.toml")),
+                                 f"{rel}/pyproject.toml".lstrip("./")))
                 sources.append(f"{rel}/pyproject.toml")
             if (dirpath / "Pipfile").is_file():
                 import re
+                pip_deps = []
                 for line in _read(dirpath / "Pipfile").splitlines():
                     m = re.match(r'^\s*"?([A-Za-z0-9._-]+)"?\s*=\s*"?([^"#\n]*)', line)
                     if m and not m.group(1).startswith(("[", "python_version")):
-                        deps.append({"name": m.group(1),
-                                     "specifier": m.group(2).strip().strip('"').strip("*"),
-                                     "line": line})
+                        pip_deps.append({"name": m.group(1),
+                                         "specifier": m.group(2).strip().strip('"').strip("*"),
+                                         "line": line})
+                deps.extend(_tag(pip_deps, f"{rel}/Pipfile".lstrip("./")))
                 sources.append(f"{rel}/Pipfile")
             if (dirpath / "poetry.lock").is_file():
                 try:
                     import tomllib
                     lock = tomllib.loads(_read(dirpath / "poetry.lock", 2_000_000))
-                    for pkg in lock.get("package", []):
-                        deps.append({"name": pkg.get("name", ""), "specifier": f"=={pkg.get('version')}",
-                                     "line": "poetry.lock"})
+                    lock_deps = [{"name": pkg.get("name", ""),
+                                  "specifier": f"=={pkg.get('version')}",
+                                  "line": "poetry.lock"} for pkg in lock.get("package", [])]
+                    deps.extend(_tag(lock_deps, f"{rel}/poetry.lock".lstrip("./")))
                     sources.append(f"{rel}/poetry.lock")
                 except Exception as exc:  # noqa: BLE001
                     context.log("WARN", f"poetry.lock unreadable: {exc}")
@@ -191,6 +204,7 @@ class DependencyScanner(BaseScanner):
                 continue
             seen.add(name.lower())
             spec = dep.get("specifier", "")
+            manifest = dep.get("manifest") or None
             exact = _parse_pinned(spec)
             packages.append({"name": name, "specifier": spec, "pinned_version": exact})
 
@@ -200,7 +214,7 @@ class DependencyScanner(BaseScanner):
                            rule_id="DEP-DANGEROUS-001", severity="High",
                            title=f"Dangerous/unmaintained dependency: {name}",
                            summary=DANGEROUS_PACKAGES[name.lower()],
-                           cwe="CWE-1104", reqs=["REQ-059", "REQ-061"])
+                           cwe="CWE-1104", reqs=["REQ-059", "REQ-061"], manifest=manifest)
                 vulnerable += 1
 
             # -- advisories --------------------------------------------------
@@ -219,7 +233,7 @@ class DependencyScanner(BaseScanner):
                                            title=f"{name} {exact} affected by {adv['id']}",
                                            summary=f"{adv['summary']} (fixed in {adv['fixed']})",
                                            cwe="CWE-1395", reqs=["REQ-060"],
-                                           advisory=adv["id"])
+                                           advisory=adv["id"], manifest=manifest)
                                 vulnerable += 1
                         except InvalidVersion:
                             continue
@@ -247,7 +261,8 @@ class DependencyScanner(BaseScanner):
                            title=f"Unpinned dependency: {name}",
                            summary=f"{name} declared as '{spec or '(any)'}' - builds are not "
                                    "reproducible and can silently pull vulnerable releases.",
-                           cwe="CWE-1104", reqs=["REQ-059"], confidence="High")
+                           cwe="CWE-1104", reqs=["REQ-059"], confidence="High",
+                           manifest=manifest)
 
             # -- outdated hint ---------------------------------------------------
             hint = CURRENT_HINTS.get(name.lower())
@@ -259,7 +274,8 @@ class DependencyScanner(BaseScanner):
                                    title=f"Outdated dependency: {name} {exact}",
                                    summary=f"{name} {exact} is older than the current line ({hint}). "
                                            "Review for security fixes.",
-                                   cwe="CWE-1104", reqs=["REQ-061"], confidence="Medium")
+                                   cwe="CWE-1104", reqs=["REQ-061"], confidence="Medium",
+                                   manifest=manifest)
                 except InvalidVersion:
                     pass
 
@@ -273,20 +289,22 @@ class DependencyScanner(BaseScanner):
     # ------------------------------------------------------------------
     def _emit(self, result: ScanResult, name: str, spec: str, exact: str | None, *,
               rule_id: str, severity: str, title: str, summary: str, cwe: str,
-              reqs: list, confidence: str = "Confirmed", advisory: str | None = None) -> None:
+              reqs: list, confidence: str = "Confirmed", advisory: str | None = None,
+              manifest: str | None = None) -> None:
         # informational entries (e.g. outdated hints) are review input, not violations
         polarity = "info" if severity == "Info" else "vuln"
         evidence = Evidence(
             source="dependencies", rule_id=rule_id, polarity=polarity,
             summary=summary,
             location={"package": name, "version": exact, "spec": spec,
-                      "advisory": advisory},
+                      "manifest": manifest, "advisory": advisory},
             requirement_ids=list(reqs), confidence=confidence)
         finding = Finding(
             title=title, description=summary, severity=severity, confidence=confidence,
             category="Vulnerable Dependencies", cwe=[cwe], owasp="A06:2021",
             requirement_ids=list(reqs), sources=["dependencies"],
             evidence_ids=[evidence.id],
+            file=manifest or None,
             proof=f"{name}{('==' + exact) if exact else (' ' + spec if spec else '')}",
             remediation=(f"Upgrade {name} to a fixed version" if advisory
                          else f"Pin {name} to an exact, reviewed version"),

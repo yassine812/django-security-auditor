@@ -38,16 +38,46 @@ def _wrap(text: str, width: int = CHARS_PER_LINE) -> list[str]:
     return lines or [""]
 
 
+def _col_offsets(style: str) -> list[float]:
+    """'t:0,90,150,300' -> [0.0, 90.0, 150.0, 300.0] (points, from the left margin)."""
+    try:
+        return [float(x) for x in style.split(":", 1)[1].split(",") if x.strip() != ""]
+    except (IndexError, ValueError):
+        return [0.0]
+
+
+def _fit(text: str, width_pt: float, size: float) -> str:
+    """Truncate a table cell so it cannot overrun the next column."""
+    limit = max(4, int(width_pt / (size * 0.50)))
+    text = text.strip()
+    return text if len(text) <= limit else text[:limit - 1] + "\u2026"
+
+
 def render_pdf(blocks: list[tuple[str, str]], title: str) -> bytes:
-    """blocks: list of (style, text) where style is h1/h2/h3/body/bullet/kv."""
+    """blocks: list of (style, text).
+
+    Styles: h1/h2/h3/body/bullet/kv, plus table rows ("t:0,90,150,300" - cells
+    separated by "|"), table headers ("th:...") and horizontal rules ("hr").
+    """
     # paginate
     pages: list[list[tuple[str, str]]] = []
     current: list[tuple[str, str]] = []
     y = PAGE_H - MARGIN
     for style, text in blocks:
-        text = text.replace("\u2192", "->").replace("\u2019", "'").replace("\u201c", '"') \
-                   .replace("\u201d", '"').replace("\u2013", "-").replace("\u2022", "-")
-        wrapped = _wrap(text)
+        text = (text.replace("\u2192", "->").replace("\u2019", "'").replace("\u201c", '"')
+                    .replace("\u201d", '"').replace("\u2013", "-").replace("\u2014", "-")
+                    .replace("\u2022", "-").replace("\u2026", "...")
+                    .replace("\u00b7", "*").replace("\u00d7", "x"))
+        if style == "hr":
+            if y - LINE_HEIGHT < MARGIN:
+                pages.append(current)
+                current = []
+                y = PAGE_H - MARGIN
+            current.append((style, ""))
+            y -= LINE_HEIGHT
+            continue
+        is_row = style.startswith("t:") or style.startswith("th:")
+        wrapped = [text] if is_row else _wrap(text)
         lh = LINE_HEIGHT + (4 if style.startswith("h") else 0)
         if y - lh * len(wrapped) < MARGIN:
             pages.append(current)
@@ -66,6 +96,31 @@ def render_pdf(blocks: list[tuple[str, str]], title: str) -> bytes:
         ops = ["BT"]
         y = PAGE_H - MARGIN
         for style, line in page:
+            if style == "hr":
+                y -= LINE_HEIGHT
+                ops.append("ET")
+                ops.append(f"0.7 w 0.55 0.6 0.68 RG {MARGIN} {y + 5:.1f} m "
+                           f"{PAGE_W - MARGIN} {y + 5:.1f} l S")
+                ops.append("BT")
+                y -= 1
+                continue
+            if style.startswith("t:") or style.startswith("th:"):
+                bold = style.startswith("th:")
+                size = 8.5
+                offsets = _col_offsets(style)
+                cells = line.split("|")
+                y -= LINE_HEIGHT
+                for i, cell in enumerate(cells[:len(offsets)]):
+                    x0 = offsets[i]
+                    x1 = offsets[i + 1] if i + 1 < len(offsets) else (PAGE_W - 2 * MARGIN)
+                    txt = _fit(cell, x1 - x0 - 4, size)
+                    if not txt:
+                        continue
+                    ops.append(f"/F{'2' if bold else '1'} {size} Tf")
+                    ops.append(f"1 0 0 1 {MARGIN + x0:.1f} {y:.1f} Tm")
+                    ops.append(f"({_esc(txt)}) Tj")
+                y -= 1
+                continue
             if style == "h1":
                 font, size = "/F2", 16
             elif style == "h2":
