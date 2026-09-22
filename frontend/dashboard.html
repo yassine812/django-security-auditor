@@ -105,6 +105,13 @@ async function doLogin(){
   catch(e){document.getElementById("lerr").textContent=e.message;}
 }
 function pill(t,cls){return `<span class="pill ${cls||""}">${t}</span>`}
+function axisOf(f){
+  const dk=(f.dedup_key||""),src=new Set(f.sources||[]);
+  if(dk.startsWith("sast:")||src.has("sast"))return "A1 Code";
+  if(dk.startsWith("config:")||src.has("configuration"))return "A2 Config";
+  if(dk.startsWith("dep:")||src.has("dependencies"))return "A3 Deps";
+  return "A4 Net/DAST";
+}
 function sevPill(s){return pill(s,"sev-"+s)} function stPill(s){return pill(s.replace(/_/g," "),"st-"+s)}
 
 // ---------------- pages ----------------
@@ -180,8 +187,8 @@ async function pageAudit(id,tab){
     body=`<table><tr><th>Req</th><th>Status</th><th>Sources</th><th>Findings</th><th>Evidence / notes</th></tr>
     ${(d.requirement_results||[]).map(r=>`<tr><td><b>${r.requirement_id}</b></td><td>${stPill(r.status)}</td><td class="small">${(r.sources||[]).join(", ")}</td><td class="small">${(r.finding_ids||[]).length}</td><td class="small muted">${(r.notes||[]).join(" | ").slice(0,220)}</td></tr>`).join("")}</table>`;
   }else if(tab==="findings"){
-    body=`<table><tr><th>Title</th><th>Severity</th><th>Confidence</th><th>CWE</th><th>OWASP</th><th>Reqs</th><th>Location</th></tr>
-    ${(d.findings||[]).map(f=>`<tr><td>${f.title}<div class="small muted">${(f.description||"").slice(0,160)}</div></td><td>${sevPill(f.severity)}</td><td>${f.confidence}</td><td class="small">${(f.cwe||[]).join(", ")}</td><td class="small">${f.owasp||""}</td><td class="small">${(f.requirement_ids||[]).join(", ")}</td><td class="small">${f.file?f.file+":"+(f.line||""):(f.endpoint||"")}</td></tr>`).join("")||"<tr><td colspan=7 class='muted'>No findings</td></tr>"}</table>`;
+    body=`<table><tr><th>Title</th><th>Axis</th><th>Severity</th><th>Confidence</th><th>CWE</th><th>OWASP</th><th>Reqs</th><th>Location</th></tr>
+    ${(d.findings||[]).map(f=>`<tr><td>${f.title}<div class="small muted">${(f.description||"").slice(0,160)}</div></td><td class="small">${axisOf(f)}</td><td>${sevPill(f.severity)}</td><td>${f.confidence}</td><td class="small">${(f.cwe||[]).join(", ")}</td><td class="small">${f.owasp||""}</td><td class="small">${(f.requirement_ids||[]).join(", ")}</td><td class="small">${f.file?f.file+":"+(f.line||""):(f.endpoint||"")}</td></tr>`).join("")||"<tr><td colspan=8 class='muted'>No findings</td></tr>"}</table>`;
   }else if(tab==="endpoints"){
     body=`<table><tr><th>Method</th><th>Path</th><th>View</th><th>Note</th></tr>
     ${(d.endpoints||[]).map(e=>`<tr><td>${e.method}</td><td><code>${e.path}</code></td><td class="small">${e.view||""}</td><td class="small muted">${e.note||""}</td></tr>`).join("")||"<tr><td colspan=4 class='muted'>No endpoints discovered</td></tr>"}</table>`;

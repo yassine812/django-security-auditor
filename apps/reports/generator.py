@@ -51,6 +51,44 @@ def _owasp_map(audit: Audit) -> dict:
     return m
 
 
+# ---------------------------------------------------------------------------
+# 4-axis grouping (Code / Configuration / Dependencies / Network+DAST)
+# ---------------------------------------------------------------------------
+
+AXES = [
+    ("Axe 1 — Code (SAST)", "sast"),
+    ("Axe 2 — Configuration & secrets", "configuration"),
+    ("Axe 3 — Dependencies", "dependencies"),
+    ("Axe 4 — Network, DAST & security tests", "network"),
+]
+
+
+def _axis_index(item: dict) -> int:
+    dk = (item.get("dedup_key") or "")
+    src = set(item.get("sources") or [])
+    if dk.startswith("sast:") or "sast" in src:
+        return 0
+    if dk.startswith("config:") or "configuration" in src:
+        return 1
+    if dk.startswith("dep:") or "dependencies" in src:
+        return 2
+    return 3
+
+
+def _axis_groups(audit: Audit) -> list[list[dict]]:
+    groups: list[list[dict]] = [[] for _ in AXES]
+    for f in sorted(audit.findings, key=lambda x: x["severity"]):
+        groups[_axis_index(f)].append(f)
+    return groups
+
+
+def _axis_req_groups(audit: Audit) -> list[list[dict]]:
+    groups: list[list[dict]] = [[] for _ in AXES]
+    for r in audit.requirement_results:
+        groups[_axis_index(r)].append(r)
+    return groups
+
+
 def _limitations(audit: Audit) -> list[str]:
     items = []
     for job in audit.jobs:
@@ -139,7 +177,33 @@ def write_html(audit: Audit, path: Path) -> None:
         f"<td><code>{e((f.get('proof') or '')[:160])}</code></td></tr>"
         for f in sorted(audit.findings, key=lambda x: x["severity"]))
 
-    # precise remediation blocks (what to fix exactly)
+    # ---- 4-axis sections --------------------------------------------------
+    fg = _axis_groups(audit)
+    rg = _axis_req_groups(audit)
+    axes_html = ""
+    for (name, _key), fs, rs in zip(AXES, fg, rg):
+        stc = Counter(r["status"] for r in rs)
+        sevc = Counter(f["severity"] for f in fs)
+        mini = " &middot; ".join(
+            f"<span style='color:{STATUS_COLORS[s]}'>{stc.get(s, 0)} {s.replace('_', ' ')}</span>"
+            for s in ("PASS", "FAIL", "PARTIAL", "NOT_TESTED", "MANUAL_REVIEW"))
+        rows = "".join(
+            f"<tr><td>{e(f['title'])}</td>"
+            f"<td style='color:{SEV_COLORS.get(f['severity'], '#000')}'>{e(f['severity'])}</td>"
+            f"<td>{e(f['confidence'])}</td>"
+            f"<td><code>{e(f.get('file') or f.get('endpoint') or '')}"
+            f"{(':' + str(f['line'])) if f.get('line') else ''}</code></td>"
+            f"<td><code>{e((f.get('proof') or '')[:120])}</code></td>"
+            f"<td>{e(fix_for(f)['after'][:220])}</td></tr>"
+            for f in fs)
+        axes_html += f"""<h2>{name}</h2>
+<p class="small" style="font-size:12px">{len(fs)} finding(s) &mdash;
+{', '.join(f'{k}: {v}' for k, v in sevc.items()) or 'clean'} &nbsp;|&nbsp;
+requirements: {mini}</p>
+<table><tr><th>Finding</th><th>Severity</th><th>Confidence</th><th>Location</th>
+<th>Vulnerable code</th><th>Exact fix</th></tr>
+{rows or '<tr><td colspan=6>No findings on this axis</td></tr>'}</table>
+"""
     fix_blocks = "".join(
         (lambda fx: f"""<div class=\"banner\" style=\"border-left:6px solid {SEV_COLORS.get(f['severity'],'#334155')}\">
  <b>[{e(f['severity'])}] {e(f['title'])}</b> &mdash; <code>{e(f.get('file') or f.get('endpoint') or '')}{(':' + str(f['line'])) if f.get('line') else ''}</code><br>
@@ -197,6 +261,8 @@ def write_html(audit: Audit, path: Path) -> None:
 <p>Requirements total: <b>{len(audit.requirement_results)}</b> &middot;
 Findings (deduplicated): <b>{len(audit.findings)}</b></p>
 
+{axes_html}
+
 <h2>Scan environment / pipeline jobs</h2>
 <table><tr><th>Job</th><th>Status</th><th>Error</th></tr>{jobs_rows}</table>
 
@@ -248,6 +314,14 @@ def write_pdf(audit: Audit, path: Path) -> None:
         f"{k}: {v}" for k, v in sev.items())))
     blocks.append(("body", "Requirements: " + ", ".join(
         f"{k}: {v}" for k, v in sorted(st.items()))))
+
+    blocks.append(("h2", "1bis. Results by axis (4 axes)"))
+    for (name, _key), fs, rs in zip(AXES, _axis_groups(audit), _axis_req_groups(audit)):
+        sevc = Counter(f["severity"] for f in fs)
+        stc = Counter(r["status"] for r in rs)
+        blocks.append(("kv", f"{name}: {len(fs)} finding(s) "
+                             f"[{', '.join(f'{k}: {v}' for k, v in sevc.items()) or 'clean'}]; "
+                             f"requirements [{', '.join(f'{k}: {v}' for k, v in stc.items())}]"))
 
     blocks.append(("h2", "2. Project information"))
     blocks.append(("kv", f"name: {project.get('name')}"))
